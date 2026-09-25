@@ -20,6 +20,15 @@ repositories = {
     description = "Customer-facing web application"
     topics      = ["frontend"]
   }
+
+  # Holding pen for apps being decommissioned. GitHub refuses to remove an
+  # installation's last repository, so "revoke all access" is expressed as
+  # "point it at a repository containing nothing". Deliberately empty and
+  # deliberately boring.
+  app-quarantine = {
+    description = "Intentionally empty. Apps pending decommissioning are pointed here to strip their effective access."
+    topics      = ["governance"]
+  }
 }
 
 app_catalogue = {

@@ -43,7 +43,19 @@ variable "app_catalogue" {
     justification   = string
     review_by       = string
     repositories    = list(string)
+    decommissioning = optional(bool, false)
   }))
+
+  # GitHub refuses to remove the last repository from an installation:
+  #   422 "Cannot remove the last repository from this installation."
+  # The provider does not surface that error — `terraform apply` reports
+  # success, nothing changes, and every subsequent plan shows the same diff
+  # forever. Reject the empty list here so the failure is a clear message at
+  # plan time rather than a silent drift loop.
+  validation {
+    condition     = alltrue([for a in var.app_catalogue : length(a.repositories) > 0])
+    error_message = "An installation must retain at least one repository — GitHub rejects removing the last one. To revoke access, point the app at the quarantine repository instead of using an empty list. See docs/GOVERNANCE.md stage 1."
+  }
 
   validation {
     condition     = alltrue([for a in var.app_catalogue : can(formatdate("YYYY-MM-DD", "${a.review_by}T00:00:00Z"))])

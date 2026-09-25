@@ -32,15 +32,15 @@ jobs:
         working-directory: terraform
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Configure AWS credentials (OIDC, read-only state)
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
           role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
@@ -54,14 +54,33 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.TF_GITHUB_TOKEN }}
         run: |
           set +e
-          terraform plan -no-color -input=false -lock=false -detailed-exitcode 2>&1 | tee reconcile.txt
-          echo "exitcode=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+          terraform plan -no-color -input=false -lock=false -detailed-exitcode -out=tfplan 2>&1 | tee reconcile.txt
+          CODE=${PIPESTATUS[0]}
+          echo "exitcode=$CODE" >> "$GITHUB_OUTPUT"
+
+          # A failing check block is only a WARNING: with no resource changes
+          # terraform still exits 0. Orphan detection lives in a check block,
+          # so the exit code alone would never report an undeclared app — the
+          # single most important thing this job exists to find.
+          #
+          # Read the check results out of the plan instead.
+          FAILED=0
+          if [ -f tfplan ]; then
+            FAILED=$(terraform show -json tfplan \
+              | jq '[.checks[]? | select(.status == "fail")] | length')
+            terraform show -json tfplan \
+              | jq -r '.checks[]? | select(.status == "fail") | .address.to_display' \
+              > failed_checks.txt
+          fi
+          echo "failed_checks=$FAILED" >> "$GITHUB_OUTPUT"
+          echo "plan exit=$CODE, failed checks=$FAILED"
 
       - name: Raise or update reconciliation issue
-        if: steps.plan.outputs.exitcode != '0'
-        uses: actions/github-script@v7
+        if: steps.plan.outputs.exitcode != '0' || steps.plan.outputs.failed_checks != '0'
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         env:
           EXITCODE: ${{ steps.plan.outputs.exitcode }}
+          FAILEDCHECKS: ${{ steps.plan.outputs.failed_checks }}
         with:
           script: |
             const fs = require('fs');
@@ -69,12 +88,18 @@ jobs:
             if (out.length > 50000) out = out.slice(0, 50000) + '\n...truncated.';
 
             const code = process.env.EXITCODE;
-            // 2 = drift between the catalogue and the organisation.
-            // 1 = plan failed outright, which includes an expired review_by
-            //     tripping the precondition in app_access.tf.
-            const reason = code === '2'
-              ? 'The organisation no longer matches the catalogue (drift, or an undeclared installation).'
-              : 'The plan failed. This includes an app past its review_by date, which is a blocking condition.';
+            const failed = process.env.FAILEDCHECKS;
+            // Governance checks are warnings, so they do NOT move the exit
+            // code. They are reported separately and are the only way an
+            // orphaned installation surfaces here.
+            let reason;
+            if (failed !== '0') {
+              reason = `${failed} governance check(s) failed — an undeclared installation, or an app scoped to all repositories.`;
+            } else if (code === '2') {
+              reason = 'The organisation no longer matches the catalogue (drift).';
+            } else {
+              reason = 'The plan failed. This includes an app past its review_by date, which is a blocking condition.';
+            }
 
             const title = 'Reconciliation: organisation does not match the catalogue';
             const body = [
@@ -119,8 +144,8 @@ jobs:
             }
 
       - name: Close the reconciliation issue when clean
-        if: steps.plan.outputs.exitcode == '0'
-        uses: actions/github-script@v7
+        if: steps.plan.outputs.exitcode == '0' && steps.plan.outputs.failed_checks == '0'
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
           script: |
             const { data: open } = await github.rest.issues.listForRepo({
@@ -145,5 +170,5 @@ jobs:
             }
 
       - name: Fail the run when reconciliation found something
-        if: steps.plan.outputs.exitcode != '0'
+        if: steps.plan.outputs.exitcode != '0' || steps.plan.outputs.failed_checks != '0'
         run: exit 1

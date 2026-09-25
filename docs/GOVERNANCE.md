@@ -180,19 +180,45 @@ read-only apps on documentation repositories.
 Removing an app is not one action. It is a staged descent where every early
 step is reversible and the irreversible step comes last.
 
-### Stage 1 — Narrow to zero repositories *(reversible: `git revert`)*
+### Stage 1 — Narrow to the quarantine repository *(reversible: `git revert`)*
 
 ```hcl
-renovate = {
-  repositories = []   # was ["payments-api", "web-frontend"]
+imgbot = {
+  decommissioning = true
+  repositories = [
+    "app-quarantine",   # was ["web-frontend"]
+  ]
 }
 ```
 
-Merge the PR. The installation still exists but reaches nothing. If this breaks
-something, revert the commit and access returns within one apply.
+Merge the PR. The installation still exists but reaches only a repository that
+contains nothing. If this breaks something, revert the commit and access
+returns within one apply.
 
 This is the key move: it converts an irreversible administrative action into a
 reversible code change, reviewed like any other.
+
+**Why a quarantine repository instead of an empty list.** GitHub refuses to
+remove an installation's last repository:
+
+```
+422 Cannot remove the last repository from this installation.
+```
+
+The Terraform provider does not surface that error. `terraform apply` reports
+success, nothing actually changes, and every subsequent plan shows the same
+pending diff — a silent permanent drift loop rather than a clean failure. This
+was found by testing, not by reading; an earlier draft of this runbook said
+"narrow to zero" and would not have worked.
+
+`terraform/variables.tf` therefore rejects an empty list at plan time with a
+message pointing here, and `app-quarantine` exists so that "reaches nothing
+useful" is expressible at all.
+
+The `decommissioning = true` flag is what lets an **expired** app be removed.
+Without it the expiry precondition would block the change, forcing an owner to
+extend the review date of an app they are trying to delete — the control
+preventing the outcome it exists to encourage.
 
 ### Stage 2 — Soak *(7–14 days)*
 

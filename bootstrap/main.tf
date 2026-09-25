@@ -38,6 +38,36 @@ provider "aws" {
 
 resource "aws_s3_bucket" "state" {
   bucket = var.state_bucket
+
+  # Losing this bucket means losing the record of every governed app.
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+# Versioning and encryption do not stop a plaintext request. Refuse them.
+data "aws_iam_policy_document" "state_bucket" {
+  statement {
+    effect    = "Deny"
+    actions   = ["s3:*"]
+    resources = [aws_s3_bucket.state.arn, "${aws_s3_bucket.state.arn}/*"]
+
+    principals {
+      type        = "*"
+      identifiers = ["*"]
+    }
+
+    condition {
+      test     = "Bool"
+      variable = "aws:SecureTransport"
+      values   = ["false"]
+    }
+  }
+}
+
+resource "aws_s3_bucket_policy" "state" {
+  bucket = aws_s3_bucket.state.id
+  policy = data.aws_iam_policy_document.state_bucket.json
 }
 
 resource "aws_s3_bucket_versioning" "state" {
@@ -182,17 +212,31 @@ resource "aws_iam_role" "apply" {
   assume_role_policy = data.aws_iam_policy_document.assume_apply.json
 }
 
+# CI only ever touches the main configuration's state. Scoping to that exact
+# key keeps bootstrap.tfstate — which holds the OIDC roles, the branch
+# protection and the reviewing team — out of reach of the pipeline those
+# controls govern. Granting bucket/* would let a compromised apply rewrite the
+# controls that are supposed to constrain it.
+locals {
+  main_state_arn = "${aws_s3_bucket.state.arn}/github-app-governance/terraform.tfstate"
+}
+
 data "aws_iam_policy_document" "state_read" {
   statement {
     effect    = "Allow"
     actions   = ["s3:ListBucket"]
     resources = [aws_s3_bucket.state.arn]
+    condition {
+      test     = "StringLike"
+      variable = "s3:prefix"
+      values   = ["github-app-governance/*"]
+    }
   }
 
   statement {
     effect    = "Allow"
     actions   = ["s3:GetObject"]
-    resources = ["${aws_s3_bucket.state.arn}/*"]
+    resources = [local.main_state_arn]
   }
 }
 
@@ -201,12 +245,20 @@ data "aws_iam_policy_document" "state_write" {
     effect    = "Allow"
     actions   = ["s3:ListBucket"]
     resources = [aws_s3_bucket.state.arn]
+    condition {
+      test     = "StringLike"
+      variable = "s3:prefix"
+      values   = ["github-app-governance/*"]
+    }
   }
 
+  # No s3:DeleteObject — Terraform never needs to delete its own state, and
+  # versioning means a destructive write is recoverable while a delete is
+  # one step closer to not being.
   statement {
     effect    = "Allow"
-    actions   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
-    resources = ["${aws_s3_bucket.state.arn}/*"]
+    actions   = ["s3:GetObject", "s3:PutObject"]
+    resources = [local.main_state_arn]
   }
 
   statement {

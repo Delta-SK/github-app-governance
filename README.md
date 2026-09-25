@@ -108,6 +108,34 @@ go build an OAuth flow you do not need. The provider never calls that endpoint.
 The per-installation endpoints above accept classic PATs normally — verified
 against this org by `PUT` and `DELETE` returning `204`.
 
+### Fine-grained PATs do not work — tested
+
+The obvious way to shrink this credential is a fine-grained token scoped to one
+organisation. It does not work, and the failure is architectural rather than a
+permissions mistake. Tested against this org with `Administration: Read/Write`
+at both repository and organisation level:
+
+| Endpoint | Fine-grained PAT |
+| --- | --- |
+| `/orgs/{org}/installations` | **200** — the audit read works |
+| `/user/installations/{id}/repositories` (read) | **403** |
+| `/user/installations/{id}/repositories/{repo}` (write) | **403** |
+
+The rejection is `Resource not accessible by personal access token`, which is
+GitHub's generic signal that an endpoint has **no fine-grained support at
+all** — not that a permission is missing. No combination of toggles enables it.
+
+Note the split: the **audit** half of this project is reachable with a
+fine-grained token, the **enforcement** half is not. A read-only reconciler
+could therefore run on a much weaker credential than the applier, if the
+reconciler were rewritten to query the installations API directly instead of
+running `terraform plan`.
+
+With GitHub App auth, fine-grained PATs and `GITHUB_TOKEN` all excluded, a
+classic PAT is the only credential that drives this resource. That is a
+constraint of the GitHub API, not a design choice, and it is why the blast
+radius is managed by *who owns the token* rather than by scoping it.
+
 ### What this costs, and what it would cost at scale
 
 A human-owned PAT is the weak point of this design. It is long-lived, bound to

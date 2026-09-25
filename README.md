@@ -65,7 +65,13 @@ CODEOWNERS routing review per team. The schema does not change.
 - Terraform `~> 1.9.0`
 - An AWS account (state backend) with credentials available locally
 - A GitHub organisation where you are an **owner**
-- A **classic** personal access token with `repo` and `admin:org` scopes
+- A **classic** personal access token with `repo` and `admin:org` scopes.
+  Add `workflow` as well if you intend to push changes to
+  `.github/workflows/` — GitHub rejects such pushes otherwise. The token
+  Actions uses at runtime (`TF_GITHUB_TOKEN`) does **not** need `workflow`;
+  only the developer pushing the files does.
+  `delete_repo` is deliberately **not** granted: Terraform never deletes
+  repositories here, so the token cannot either.
 - At least two GitHub Apps installed on the org, each set to
   **"Only select repositories"**
 

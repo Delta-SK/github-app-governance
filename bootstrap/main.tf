@@ -120,15 +120,24 @@ data "aws_iam_policy_document" "assume_plan" {
       values   = ["sts.amazonaws.com"]
     }
 
+    # Declaring `environment:` on a job REPLACES the :pull_request / :ref:...
+    # portion of the subject claim with :environment:<name>. A trust policy
+    # written against the ref-based claims stops matching the moment a job is
+    # moved into an environment.
+    #
+    # This is an improvement, not just a quirk: the environment carries its own
+    # deployment branch policy, so "which branches may assume this role" is
+    # enforced by the environment rather than duplicated in IAM.
+    #
+    # plan       -> untrusted PR code, read-only state
+    # production -> trusted main-only code; the reconciler runs here and also
+    #               takes this read-only role, which costs nothing.
     condition {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
       values = [
-        "${local.subject_prefix}:pull_request",
-        # The scheduled reconciler runs from main and only reads state.
-        # Granting main read-only access alongside its read-write apply role
-        # costs nothing: this role cannot mutate anything.
-        "${local.subject_prefix}:ref:refs/heads/main",
+        "${local.subject_prefix}:environment:plan",
+        "${local.subject_prefix}:environment:production",
       ]
     }
   }
@@ -150,10 +159,13 @@ data "aws_iam_policy_document" "assume_apply" {
       values   = ["sts.amazonaws.com"]
     }
 
+    # Only the production environment, which is itself restricted to protected
+    # branches. The plan environment is deliberately absent: untrusted pull
+    # request code must never reach a credential that can mutate state.
     condition {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["${local.subject_prefix}:ref:refs/heads/main"]
+      values   = ["${local.subject_prefix}:environment:production"]
     }
   }
 }

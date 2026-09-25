@@ -1,0 +1,12 @@
+# The catalogue is the authorisation record for every GitHub App in the org.
+# Changes to it must be reviewed by the team accountable for app governance,
+# regardless of who opens the pull request.
+/terraform/catalogue.auto.tfvars  @Delta-SK/platform-engineering
+
+# Backend, provider pinning and the governance checks themselves.
+/terraform/versions.tf            @Delta-SK/platform-engineering
+/terraform/checks.tf              @Delta-SK/platform-engineering
+/bootstrap/                       @Delta-SK/platform-engineering
+
+# CI is what enforces the flow; changing it changes the controls.
+/.github/workflows/               @Delta-SK/platform-engineering

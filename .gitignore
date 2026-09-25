@@ -1,0 +1,32 @@
+# Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+plan.txt
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+
+# Credentials — never commit
+*.pem
+*.key
+.env
+.gh_env
+*.auto.tfvars.local
+secrets.tfvars
+
+# Lock files ARE committed (reproducible provider versions):
+!.terraform.lock.hcl
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp

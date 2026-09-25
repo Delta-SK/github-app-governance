@@ -29,9 +29,11 @@ app_catalogue = {
     purpose         = "Automated dependency update pull requests"
     justification   = "Keeps transitive dependencies patched without manual tracking; required by the supply-chain policy."
     review_by       = "2027-03-31"
+    # Narrowed 2026-09-25: web-frontend pins dependencies via its own
+    # lockfile workflow, so Renovate's access there was redundant.
+    # Ticket: PLAT-1184
     repositories = [
       "payments-api",
-      "web-frontend",
     ]
   }
 

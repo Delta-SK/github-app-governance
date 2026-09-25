@@ -88,12 +88,16 @@ data "aws_iam_policy_document" "assume" {
     # Apply runs on main; plan runs on pull_request. Both need state access,
     # so both subjects are trusted. Splitting these into a read-only plan role
     # is a documented refinement, not implemented here.
+    #
+    # The @<id> segments are not decoration — GitHub issues the subject claim
+    # as repo:<org>@<org_id>/<repo>@<repo_id>:... Trust policies written in the
+    # older repo:<org>/<repo>:... form silently fail to match.
     condition {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
       values = [
-        "repo:${var.github_org}/${var.github_repo}:ref:refs/heads/main",
-        "repo:${var.github_org}/${var.github_repo}:pull_request",
+        "repo:${var.github_org}@${var.github_org_id}/${var.github_repo}@${var.github_repo_id}:ref:refs/heads/main",
+        "repo:${var.github_org}@${var.github_org_id}/${var.github_repo}@${var.github_repo_id}:pull_request",
       ]
     }
   }

@@ -167,7 +167,27 @@ closed structurally rather than procedurally. Two controls do it:
 | Control | Effect |
 | --- | --- |
 | `TF_GITHUB_TOKEN` lives in the `plan` **environment**, with required reviewers | The credential is released per run, by a human who has seen the diff. It is not a repository secret, so no job can read it implicitly |
-| Plan assumes a **read-only** AWS role (`s3:GetObject` only) | Even holding the credential, the job cannot write or delete state. No DynamoDB access at all, since plan runs `-lock=false` |
+| Plan assumes a **read-only** AWS role (`s3:GetObject` only) | Even holding the credential, the job cannot write or delete Terraform state |
+
+**Be precise about what "read-only plan" means: it is read-only for AWS state
+only.** The GitHub credential released to the plan environment is the same
+full-write, `admin:org` classic PAT that apply uses. GitHub offers no weaker
+credential that can read installation repository access (see *Fine-grained
+PATs do not work*), so the plan job genuinely holds the power to modify the
+organisation directly.
+
+The approval gate is therefore the whole of the control, not a second layer
+behind a scoped token. One approved malicious run is sufficient. That places
+real weight on the reviewer actually reading the diff before approving —
+including the workflow file itself, since a pull request can change it.
+
+Two further consequences worth naming rather than discovering:
+
+- Third-party actions are **pinned to commit SHAs**, not tags. `@v4` is a
+  moving reference; a compromised `setup-terraform` release would otherwise
+  hand this job a trojaned Terraform binary alongside an org-owner token.
+- `.github/` is covered by CODEOWNERS, because a pull request that edits the
+  workflow is editing the control that would have shown you the edit.
 
 There are **no repository-level secrets** in this repo — verify with
 `gh secret list`, which returns nothing. Everything is environment-scoped.
@@ -183,11 +203,26 @@ GitHub.
 
 | Role | Trusted subject | Permissions |
 | --- | --- | --- |
-| `github-app-governance-plan` | `:pull_request`, `:ref:refs/heads/main` | `s3:GetObject`, `s3:ListBucket` |
-| `github-app-governance-apply` | `:ref:refs/heads/main` | full state read/write + DynamoDB lock |
+| `github-app-governance-plan` | `:environment:plan`, `:environment:production` | `s3:GetObject` on the main state key |
+| `github-app-governance-apply` | `:environment:production` | `s3:GetObject` + `s3:PutObject` on the main state key, DynamoDB lock |
 
-The plan role additionally trusts `main` so the scheduled reconciler can read
-state; it still cannot mutate anything.
+Declaring `environment:` on a job **replaces** the `:pull_request` /
+`:ref:refs/heads/main` portion of the subject claim with
+`:environment:<name>`. Trust policies written against the ref-based form stop
+matching the moment a job moves into an environment — with the same opaque
+`Not authorized to perform sts:AssumeRoleWithWebIdentity` as the ID mismatch
+above. It is the better form regardless: the environment carries its own
+deployment-branch policy, so "which branches may assume this role" is
+enforced once, by the environment, rather than duplicated in IAM.
+
+The plan role also trusts `production` so the scheduled reconciler can read
+state; it still cannot write anything.
+
+Both roles are scoped to `github-app-governance/terraform.tfstate`
+specifically, **not** `bucket/*`. `bootstrap.tfstate` holds the OIDC roles,
+this repository's branch protection and the reviewing team — CI must not be
+able to rewrite the controls that constrain it. Neither role has
+`s3:DeleteObject`.
 
 **The OIDC subject claim is not the documented format.** GitHub issues it with
 immutable numeric IDs embedded:
@@ -414,6 +449,17 @@ than a hunt.
 access not in the catalogue. That is the point, but the first apply against an
 existing org will revoke undeclared access — plan before applying to a live
 organisation.
+
+**An installation cannot be reduced to zero repositories.** GitHub returns
+`422 Cannot remove the last repository from this installation`, and the
+provider does not surface it: `terraform apply` reports success, nothing
+changes, and every later plan shows the same pending diff forever. A silent
+drift loop rather than an error.
+
+`variables.tf` rejects empty repository lists at plan time for this reason, and
+the `app-quarantine` repository exists so revocation is expressible — an app
+being decommissioned is pointed at a repository containing nothing. Verified
+by applying it against this org and confirming the follow-up plan is clean.
 
 **A human-owned PAT is the root credential.** Discussed under *Authentication*.
 

@@ -62,3 +62,11 @@ variable "environment_reviewer_ids" {
   type        = list(number)
   default     = [53433049] # SergeyKirakosyan
 }
+
+variable "app_owner_teams" {
+  description = "Teams that own catalogued GitHub Apps, keyed by team slug. Every `owner` in the catalogue must resolve to one of these."
+  type        = map(string)
+  default = {
+    "web-team" = "Owns the customer-facing web application and the apps that serve it."
+  }
+}

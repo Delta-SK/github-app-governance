@@ -31,6 +31,18 @@ resource "github_team_repository" "governance" {
   permission = "push"
 }
 
+// Teams that own catalogued apps. These must exist for the
+// owners_are_real_teams check in ../terraform to pass — an owner field naming
+// a team that was never created is indistinguishable from one naming a team
+// that was deleted, and both mean the app is unowned.
+resource "github_team" "app_owners" {
+  for_each = var.app_owner_teams
+
+  name        = each.key
+  description = each.value
+  privacy     = "closed"
+}
+
 resource "github_team_members" "platform_engineering" {
   team_id = github_team.platform_engineering.id
 

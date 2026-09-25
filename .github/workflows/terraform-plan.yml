@@ -1,10 +1,11 @@
 name: terraform-plan
 
+# No `paths:` filter, deliberately. `plan` is a required status check, and a
+# required check that never reports leaves the pull request stuck on
+# "Expected" forever. A filtered workflow does not report at all, so a
+# docs-only or bootstrap-only change could never be merged.
 on:
   pull_request:
-    paths:
-      - "terraform/**"
-      - ".github/workflows/terraform-*.yml"
 
 # Least privilege: read the code, write a PR comment, mint an OIDC token.
 # No AWS keys are stored anywhere in GitHub.
@@ -21,9 +22,10 @@ jobs:
   plan:
     name: plan
     runs-on: ubuntu-latest
-    # Fork PRs receive no secrets, so the job would fail confusingly rather
-    # than being skipped on purpose. Skip it on purpose.
-    if: github.event.pull_request.head.repo.full_name == github.repository
+    # No job-level `if:` for forks. GitHub counts a SKIPPED required check as
+    # passing, so skipping here would let a fork pull request satisfy `plan`
+    # without a plan ever running. The fork case is failed explicitly below
+    # instead.
 
     # THIS JOB RUNS UNTRUSTED CODE. For pull_request events GitHub executes
     # the workflow definition from the PR head, so anyone who can push a
@@ -41,15 +43,22 @@ jobs:
         working-directory: terraform
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Reject fork pull requests
+        if: github.event.pull_request.head.repo.full_name != github.repository
+        run: |
+          echo "::error::Fork pull requests cannot run terraform plan — forks receive no secrets."
+          echo "Re-open this change as a branch on the repository itself."
+          exit 1
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Configure AWS credentials (OIDC, read-only state)
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
           role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
@@ -78,7 +87,7 @@ jobs:
           echo "exitcode=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
 
       - name: Comment plan on PR
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         env:
           FMT: ${{ steps.fmt.outcome }}
           VALIDATE: ${{ steps.validate.outcome }}

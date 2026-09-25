@@ -65,3 +65,46 @@ check "reviews_are_due_soon" {
     )
   }
 }
+
+check "owners_are_real_teams" {
+  // `owner` being free text is how ownership rots: a team is renamed or
+  // deleted during a reorg and the catalogue keeps naming a team that no
+  // longer exists. Nobody notices, because nothing was ever checking.
+  //
+  // A warning rather than a blocker: a deleted team is a reason to find a new
+  // owner, not a reason to freeze every app in the org.
+  assert {
+    condition = length(setsubtract(
+      toset([for app in var.app_catalogue : app.owner]),
+      toset(data.github_organization_teams.all.teams[*].slug)
+    )) == 0
+
+    error_message = format(
+      "Catalogue names owner team(s) that do not exist in the organisation: %s. Existing teams: %s. Either create the team, correct the entry, or reassign the app to a team that will actually answer for it.",
+      join(", ", setsubtract(
+        toset([for app in var.app_catalogue : app.owner]),
+        toset(data.github_organization_teams.all.teams[*].slug)
+      )),
+      join(", ", data.github_organization_teams.all.teams[*].slug)
+    )
+  }
+}
+
+check "no_suspended_installations" {
+  // A suspended installation still holds its grants and reappears intact when
+  // unsuspended. Terraform reports no drift, so without this it is invisible.
+  assert {
+    condition = length([
+      for i in data.github_organization_app_installations.audit.installations :
+      i.app_slug if i.suspended && contains(keys(var.app_catalogue), i.app_slug)
+    ]) == 0
+
+    error_message = format(
+      "Catalogued app(s) currently suspended: %s. Suspension retains every grant — either complete the decommissioning (docs/GOVERNANCE.md stage 4) or unsuspend and confirm the access is still wanted.",
+      join(", ", [
+        for i in data.github_organization_app_installations.audit.installations :
+        i.app_slug if i.suspended && contains(keys(var.app_catalogue), i.app_slug)
+      ])
+    )
+  }
+}

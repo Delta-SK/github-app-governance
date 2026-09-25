@@ -42,7 +42,7 @@ app_catalogue = {
     owner           = "web-team"
     purpose         = "Lossless image compression pull requests"
     justification   = "Reduces page weight on the marketing site. Only meaningful where images are served."
-    review_by       = "2025-01-31"
+    review_by       = "2027-01-31"
     repositories = [
       "web-frontend",
     ]

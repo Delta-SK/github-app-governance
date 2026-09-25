@@ -335,6 +335,13 @@ deadlock the demonstration. `.github/CODEOWNERS` is in place and is what would
 enforce review in a real organisation with more than one engineer. This is a
 constraint of the throwaway org, not a design choice.
 
+**Organisation owners can bypass branch protection** (`enforce_admins` is
+false), so a determined admin can push to `main` without a plan. That mirrors
+how most organisations run — owners retain break-glass access — but it does
+mean branch protection is a guardrail here, not a hard boundary. Turning on
+`enforce_admins` closes it, at the cost of needing a documented break-glass
+procedure for the case where CI itself is broken.
+
 **This repository's own branch protection is not Terraform-managed.** Deliberate:
 if Terraform owned the required status checks on `main` and an apply half-failed,
 `main` would become unmergeable and the only exit would be a UI override — in a

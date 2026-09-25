@@ -1,0 +1,149 @@
+name: reconcile
+
+# Detection cannot depend on somebody happening to open a pull request.
+# This runs the same governance checks on a schedule and raises an issue when
+# the organisation stops matching the catalogue.
+on:
+  schedule:
+    - cron: "0 7 * * 1" # Mondays 07:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+  issues: write
+
+env:
+  TF_VERSION: "1.9.0"
+  AWS_REGION: eu-central-1
+
+jobs:
+  reconcile:
+    name: reconcile
+    runs-on: ubuntu-latest
+
+    # Runs from main, so it is trusted code — but it only ever reads. It takes
+    # the production environment for the GitHub token and the read-only plan
+    # role for state, so a bug here cannot damage state.
+    environment: production
+
+    defaults:
+      run:
+        working-directory: terraform
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC, read-only state)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: terraform init
+        run: terraform init -input=false
+
+      - name: terraform plan
+        id: plan
+        env:
+          GITHUB_TOKEN: ${{ secrets.TF_GITHUB_TOKEN }}
+        run: |
+          set +e
+          terraform plan -no-color -input=false -lock=false -detailed-exitcode 2>&1 | tee reconcile.txt
+          echo "exitcode=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Raise or update reconciliation issue
+        if: steps.plan.outputs.exitcode != '0'
+        uses: actions/github-script@v7
+        env:
+          EXITCODE: ${{ steps.plan.outputs.exitcode }}
+        with:
+          script: |
+            const fs = require('fs');
+            let out = fs.readFileSync('terraform/reconcile.txt', 'utf8');
+            if (out.length > 50000) out = out.slice(0, 50000) + '\n...truncated.';
+
+            const code = process.env.EXITCODE;
+            // 2 = drift between the catalogue and the organisation.
+            // 1 = plan failed outright, which includes an expired review_by
+            //     tripping the precondition in app_access.tf.
+            const reason = code === '2'
+              ? 'The organisation no longer matches the catalogue (drift, or an undeclared installation).'
+              : 'The plan failed. This includes an app past its review_by date, which is a blocking condition.';
+
+            const title = 'Reconciliation: organisation does not match the catalogue';
+            const body = [
+              `**${reason}**`,
+              '',
+              `Detected by the scheduled \`reconcile\` workflow (exit code ${code}).`,
+              '',
+              'Someone may have installed or reconfigured a GitHub App outside the pull request process,',
+              'or a catalogued app has reached its review date. See docs/GOVERNANCE.md.',
+              '',
+              '<details><summary>Plan output</summary>',
+              '',
+              '```terraform',
+              out,
+              '```',
+              '',
+              '</details>',
+            ].join('\n');
+
+            const { data: open } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'reconciliation',
+            });
+
+            if (open.length) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: open[0].number,
+                body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels: ['reconciliation'],
+              });
+            }
+
+      - name: Close the reconciliation issue when clean
+        if: steps.plan.outputs.exitcode == '0'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: open } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'reconciliation',
+            });
+            for (const issue of open) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: 'Reconciled — the organisation now matches the catalogue. Closing.',
+              });
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                state: 'closed',
+              });
+            }
+
+      - name: Fail the run when reconciliation found something
+        if: steps.plan.outputs.exitcode != '0'
+        run: exit 1

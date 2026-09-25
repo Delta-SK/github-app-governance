@@ -6,10 +6,26 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 5.0"
     }
+    github = {
+      source  = "integrations/github"
+      version = "~> 6.13"
+    }
   }
 
-  # Bootstrap deliberately uses local state: it creates the very backend the
-  # main configuration relies on. Applied once, by hand. State is gitignored.
+  # Bootstrap creates the backend that everything else uses, so the first
+  # apply against a fresh account necessarily runs with local state. Once the
+  # bucket exists, bootstrap's own state is migrated into it with
+  # `terraform init -migrate-state`, which removes the unbacked-up local file.
+  #
+  # Against a brand new account, comment this block out for the first apply,
+  # then restore it and migrate. See README "Bootstrap the backend".
+  backend "s3" {
+    bucket         = "delta-sk-tfstate-751569314116"
+    key            = "github-app-governance/bootstrap.tfstate"
+    region         = "eu-central-1"
+    dynamodb_table = "delta-sk-tfstate-lock"
+    encrypt        = true
+  }
 }
 
 provider "aws" {
@@ -69,7 +85,26 @@ resource "aws_iam_openid_connect_provider" "github" {
   thumbprint_list = ["6938fd4d98bab03faadb97b34396831e3780aea1"]
 }
 
-data "aws_iam_policy_document" "assume" {
+locals {
+  # GitHub issues the subject claim as
+  #   repo:<org>@<org_id>/<repo>@<repo_id>:...
+  # Trust policies written in the documented repo:<org>/<repo>:... form
+  # silently fail to match. Pinning the numeric IDs also stops a deleted and
+  # recreated org or repo of the same name from inheriting this trust.
+  subject_prefix = "repo:${var.github_org}@${var.github_org_id}/${var.github_repo}@${var.github_repo_id}"
+}
+
+# Two roles, split by trust boundary.
+#
+# Pull request code is UNTRUSTED: for pull_request events GitHub runs the
+# workflow definition from the PR head, so anyone who can push a branch can
+# rewrite the plan job. That job must therefore never hold credentials capable
+# of mutating state. Plan reads state and runs with -lock=false, so read-only
+# S3 access is sufficient and no DynamoDB access is needed at all.
+#
+# Code on main is TRUSTED: it has been through review and merge.
+
+data "aws_iam_policy_document" "assume_plan" {
   statement {
     effect  = "Allow"
     actions = ["sts:AssumeRoleWithWebIdentity"]
@@ -85,30 +120,83 @@ data "aws_iam_policy_document" "assume" {
       values   = ["sts.amazonaws.com"]
     }
 
-    # Apply runs on main; plan runs on pull_request. Both need state access,
-    # so both subjects are trusted. Splitting these into a read-only plan role
-    # is a documented refinement, not implemented here.
+    # Declaring `environment:` on a job REPLACES the :pull_request / :ref:...
+    # portion of the subject claim with :environment:<name>. A trust policy
+    # written against the ref-based claims stops matching the moment a job is
+    # moved into an environment.
     #
-    # The @<id> segments are not decoration — GitHub issues the subject claim
-    # as repo:<org>@<org_id>/<repo>@<repo_id>:... Trust policies written in the
-    # older repo:<org>/<repo>:... form silently fail to match.
+    # This is an improvement, not just a quirk: the environment carries its own
+    # deployment branch policy, so "which branches may assume this role" is
+    # enforced by the environment rather than duplicated in IAM.
+    #
+    # plan       -> untrusted PR code, read-only state
+    # production -> trusted main-only code; the reconciler runs here and also
+    #               takes this read-only role, which costs nothing.
     condition {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
       values = [
-        "repo:${var.github_org}@${var.github_org_id}/${var.github_repo}@${var.github_repo_id}:ref:refs/heads/main",
-        "repo:${var.github_org}@${var.github_org_id}/${var.github_repo}@${var.github_repo_id}:pull_request",
+        "${local.subject_prefix}:environment:plan",
+        "${local.subject_prefix}:environment:production",
       ]
     }
   }
 }
 
-resource "aws_iam_role" "ci" {
-  name               = "github-app-governance-ci"
-  assume_role_policy = data.aws_iam_policy_document.assume.json
+data "aws_iam_policy_document" "assume_apply" {
+  statement {
+    effect  = "Allow"
+    actions = ["sts:AssumeRoleWithWebIdentity"]
+
+    principals {
+      type        = "Federated"
+      identifiers = [aws_iam_openid_connect_provider.github.arn]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "token.actions.githubusercontent.com:aud"
+      values   = ["sts.amazonaws.com"]
+    }
+
+    # Only the production environment, which is itself restricted to protected
+    # branches. The plan environment is deliberately absent: untrusted pull
+    # request code must never reach a credential that can mutate state.
+    condition {
+      test     = "StringLike"
+      variable = "token.actions.githubusercontent.com:sub"
+      values   = ["${local.subject_prefix}:environment:production"]
+    }
+  }
 }
 
-data "aws_iam_policy_document" "state_access" {
+resource "aws_iam_role" "plan" {
+  name               = "github-app-governance-plan"
+  description        = "Read-only state access for PR-triggered plans. Assumed by untrusted PR code."
+  assume_role_policy = data.aws_iam_policy_document.assume_plan.json
+}
+
+resource "aws_iam_role" "apply" {
+  name               = "github-app-governance-apply"
+  description        = "Read-write state access for applies from main."
+  assume_role_policy = data.aws_iam_policy_document.assume_apply.json
+}
+
+data "aws_iam_policy_document" "state_read" {
+  statement {
+    effect    = "Allow"
+    actions   = ["s3:ListBucket"]
+    resources = [aws_s3_bucket.state.arn]
+  }
+
+  statement {
+    effect    = "Allow"
+    actions   = ["s3:GetObject"]
+    resources = ["${aws_s3_bucket.state.arn}/*"]
+  }
+}
+
+data "aws_iam_policy_document" "state_write" {
   statement {
     effect    = "Allow"
     actions   = ["s3:ListBucket"]
@@ -128,8 +216,14 @@ data "aws_iam_policy_document" "state_access" {
   }
 }
 
-resource "aws_iam_role_policy" "state_access" {
-  name   = "terraform-state-access"
-  role   = aws_iam_role.ci.id
-  policy = data.aws_iam_policy_document.state_access.json
+resource "aws_iam_role_policy" "plan_state_read" {
+  name   = "terraform-state-read"
+  role   = aws_iam_role.plan.id
+  policy = data.aws_iam_policy_document.state_read.json
+}
+
+resource "aws_iam_role_policy" "apply_state_write" {
+  name   = "terraform-state-write"
+  role   = aws_iam_role.apply.id
+  policy = data.aws_iam_policy_document.state_write.json
 }

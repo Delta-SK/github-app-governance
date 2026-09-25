@@ -28,6 +28,11 @@ jobs:
     name: apply
     runs-on: ubuntu-latest
 
+    # Runs code already merged to main, so it is trusted. The environment
+    # pins the credential to protected branches rather than gating on a
+    # reviewer — the pull request that merged the change was the gate.
+    environment: production
+
     defaults:
       run:
         working-directory: terraform
@@ -35,10 +40,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Configure AWS credentials (OIDC)
+      - name: Configure AWS credentials (OIDC, read-write state)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          role-to-assume: ${{ vars.AWS_APPLY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - uses: hashicorp/setup-terraform@v3

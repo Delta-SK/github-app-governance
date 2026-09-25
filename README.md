@@ -122,11 +122,44 @@ For production, in order of preference:
 3. Push GitHub for a server-to-server API for installation repository access;
    until that exists, the user-to-server requirement is a hard constraint.
 
+### The trust boundary
+
+The single most important thing to understand about this CI setup: **the plan
+job runs untrusted code.**
+
+For `pull_request` events GitHub executes the workflow definition from the
+*pull request head*, not from `main`. Anyone who can push a branch can rewrite
+the plan job and have it run whatever they like — before any review exists,
+because the job starts the moment the PR opens. Required reviews do not help
+here; the attacker never needs the pull request merged.
+
+Since this repository's credential is an org-owner PAT, that path has to be
+closed structurally rather than procedurally. Two controls do it:
+
+| Control | Effect |
+| --- | --- |
+| `TF_GITHUB_TOKEN` lives in the `plan` **environment**, with required reviewers | The credential is released per run, by a human who has seen the diff. It is not a repository secret, so no job can read it implicitly |
+| Plan assumes a **read-only** AWS role (`s3:GetObject` only) | Even holding the credential, the job cannot write or delete state. No DynamoDB access at all, since plan runs `-lock=false` |
+
+There are **no repository-level secrets** in this repo — verify with
+`gh secret list`, which returns nothing. Everything is environment-scoped.
+
+Apply is a different case: it runs code already merged to `main`, which has
+been through review. Its environment pins the credential to protected branches
+rather than gating on a reviewer, because the pull request was the gate.
+
 ### AWS
 
-GitHub Actions assumes `github-app-governance-ci` via **OIDC**. No AWS keys are
-stored in GitHub. The role trusts exactly two subjects — `ref:refs/heads/main`
-and `pull_request` — on this repository only.
+GitHub Actions assumes one of two roles via **OIDC**. No AWS keys are stored in
+GitHub.
+
+| Role | Trusted subject | Permissions |
+| --- | --- | --- |
+| `github-app-governance-plan` | `:pull_request`, `:ref:refs/heads/main` | `s3:GetObject`, `s3:ListBucket` |
+| `github-app-governance-apply` | `:ref:refs/heads/main` | full state read/write + DynamoDB lock |
+
+The plan role additionally trusts `main` so the scheduled reconciler can read
+state; it still cannot mutate anything.
 
 **The OIDC subject claim is not the documented format.** GitHub issues it with
 immutable numeric IDs embedded:
@@ -147,10 +180,11 @@ the trust policy. `bootstrap/variables.tf` therefore pins `github_org_id` and
 To see the claim your own repository issues, dispatch a workflow that prints
 `$ACTIONS_ID_TOKEN_REQUEST_URL`'s decoded payload — faster than guessing.
 
-| Name | Kind | Value |
-| --- | --- | --- |
-| `TF_GITHUB_TOKEN` | secret | classic PAT (`repo`, `admin:org`) |
-| `AWS_ROLE_ARN` | variable | `arn:aws:iam::751569314116:role/github-app-governance-ci` |
+| Name | Kind | Scope | Value |
+| --- | --- | --- | --- |
+| `TF_GITHUB_TOKEN` | secret | **environment** `plan` + `production` | classic PAT (`repo`, `admin:org`) |
+| `AWS_PLAN_ROLE_ARN` | variable | repository | read-only state role |
+| `AWS_APPLY_ROLE_ARN` | variable | repository | read-write state role |
 
 `TF_GITHUB_TOKEN` cannot be called `GITHUB_TOKEN` — that name is reserved by
 Actions. The workflows map it into the `GITHUB_TOKEN` environment variable at
@@ -168,13 +202,28 @@ terraform init
 terraform apply
 ```
 
-Creates the S3 bucket, the DynamoDB lock table, the GitHub OIDC provider and
-the CI role. It uses **local state by design** — it creates the very backend
-everything else depends on. That state is gitignored; losing it means
-re-importing four AWS resources, not losing the governed configuration.
+Creates the S3 bucket, the DynamoDB lock table, the GitHub OIDC provider, both
+CI roles, the `platform-engineering` team, this repository's branch protection,
+and the two Actions environments.
+
+Against a **fresh AWS account**, comment out the `backend "s3"` block in
+`bootstrap/main.tf` for the first apply — it cannot use a bucket that does not
+exist yet. Then restore the block and migrate:
+
+```bash
+terraform init -migrate-state
+```
+
+That moves bootstrap's own state into the bucket it just created, so no
+unbacked-up local state file is left behind. It is the one genuine
+chicken-and-egg step in the setup, and it only happens once.
 
 Copy the outputs into `terraform/versions.tf` (backend block) and into the
-repository variable `AWS_ROLE_ARN`.
+repository variables `AWS_PLAN_ROLE_ARN` and `AWS_APPLY_ROLE_ARN`.
+
+`TF_GITHUB_TOKEN` must be set as an **environment** secret on both `plan` and
+`production` — not as a repository secret. A repository secret is readable by
+every job, which would defeat the reviewer gate on `plan`.
 
 ### 2. Install the apps
 
@@ -262,22 +311,34 @@ echo $?    # 0 clean, 2 drift, 1 error
 
 ## Governance checks
 
-`checks.tf` runs three assertions on every plan. They **warn rather than
-block** — an orphaned app is a reason to investigate, not a reason to stop an
-unrelated change.
+Controls run on every plan, and are split deliberately between **blocking**
+and **warning**.
 
-| Check | Detects |
-| --- | --- |
-| `installations_are_declared` | An app installed in the org but absent from the catalogue — *the app nobody remembers installing* |
-| (same block, 2nd assert) | A catalogued app installed as `repository_selection = all`, which silently cannot be governed |
-| `app_reviews_are_current` | An entry whose `review_by` date has passed |
+| Control | Detects | Severity |
+| --- | --- | --- |
+| `precondition` in `app_access.tf` | An app past its `review_by` date | **Blocks** the plan |
+| `installations_are_declared` | An app installed in the org but absent from the catalogue — *the app nobody remembers installing* | Warns |
+| (same block, 2nd assert) | A catalogued app installed as `repository_selection = all`, which silently cannot be governed | Warns |
+| `reviews_are_due_soon` | An entry within `review_warning_days` (default 30) of expiry | Warns |
 
-The expiry check uses `plantimestamp()` rather than `timestamp()` — the latter
-is unknown at plan time, so the assertion would only evaluate during apply,
-which is after review rather than during it.
+The split is the point. **Stale data you own blocks your own apply** — an
+expiry date that never stops anything is decoration, so it is a resource
+precondition rather than a `check` block. **Somebody else's rogue installation
+does not block your unrelated change** — an orphan is a signal to investigate,
+and halting all work until it is resolved would just teach people to bypass
+the pipeline.
+
+Both use `plantimestamp()` rather than `timestamp()`: the latter is unknown at
+plan time, so the condition would only evaluate during apply — after review
+rather than during it.
+
+Detection does not depend on someone opening a pull request. `reconcile.yml`
+runs the same checks weekly and opens a GitHub issue when the organisation
+stops matching the catalogue, closing it automatically when it matches again.
 
 To see the orphan detector fire, install any app on the org without adding it
-to the catalogue, then run `terraform plan`.
+to the catalogue, then run `terraform plan`. To see expiry block, set any
+`review_by` to a past date.
 
 Full design in [docs/GOVERNANCE.md](docs/GOVERNANCE.md).
 
@@ -296,8 +357,12 @@ Full design in [docs/GOVERNANCE.md](docs/GOVERNANCE.md).
      -backend-config="dynamodb_table=your-lock-table"
    ```
 
-3. Update `github_org` / `github_repo` in `bootstrap/variables.tf` so the OIDC
-   trust policy matches the new repository, and re-apply `bootstrap/`.
+3. Update `github_org`, `github_repo`, **`github_org_id` and `github_repo_id`**
+   in `bootstrap/variables.tf` so the OIDC trust policy matches the new
+   repository, along with `platform_team_members` and
+   `environment_reviewer_ids`. Then re-apply `bootstrap/`. The two numeric IDs
+   are the easiest thing to forget and produce the least helpful error — see
+   *Authentication*.
 4. Replace `installation_id` values in `catalogue.auto.tfvars` — they are
    per-installation and will not carry over.
 5. Update the team names in `.github/CODEOWNERS`.
@@ -328,12 +393,13 @@ organisation.
 **public** — branch protection is unavailable on private repositories on Free.
 On a paid plan, set `visibility = "private"` in `repositories.tf`.
 
-**Required reviews are not enforced on this repository.** `main` requires the
-`plan` status check to pass, but not an approving review — a single-account
-test organisation cannot approve its own pull requests, so requiring one would
-deadlock the demonstration. `.github/CODEOWNERS` is in place and is what would
-enforce review in a real organisation with more than one engineer. This is a
-constraint of the throwaway org, not a design choice.
+**A single-account organisation cannot satisfy its own review requirement.**
+`main` requires one approving CODEOWNER review, but in this test org the only
+member of `@Delta-SK/platform-engineering` is also the only author — and GitHub
+does not permit self-approval. Merges here therefore use the org-owner bypass.
+The control is correctly configured and would function normally with a second
+engineer; it simply cannot be *demonstrated* satisfying itself. Adding one more
+account to the org is the only real fix.
 
 **Organisation owners can bypass branch protection** (`enforce_admins` is
 false), so a determined admin can push to `main` without a plan. That mirrors
@@ -342,26 +408,37 @@ mean branch protection is a guardrail here, not a hard boundary. Turning on
 `enforce_admins` closes it, at the cost of needing a documented break-glass
 procedure for the case where CI itself is broken.
 
-**This repository's own branch protection is not Terraform-managed.** Deliberate:
-if Terraform owned the required status checks on `main` and an apply half-failed,
-`main` would become unmergeable and the only exit would be a UI override — in a
-project whose whole thesis is not using the UI. Terraform manages the repositories
-it creates; this one is configured once by hand.
+**Automated decommissioning is documented but not implemented.** The escalation
+ladder in `docs/GOVERNANCE.md` describes an auto-generated pull request that
+narrows an expired app to zero repositories. Expiry currently blocks the plan
+and the reconciler raises an issue; nothing opens that PR for you.
+
+**Tombstones are a convention, not a control.** Nothing enforces that a removed
+catalogue entry leaves a record behind.
+
+**One catalogue, one state.** The per-team split described in
+`docs/GOVERNANCE.md` is a design, not an implementation. At two apps it would
+be premature; the point at which it stops being premature is discussed there.
 
 ---
 
 ## Intentionally omitted
 
-Scoped out against the 8-hour budget, in rough order of what I would add next:
+In rough order of what I would add next:
 
-- **A read-only OIDC role for plan.** Plan runs `-lock=false` and only reads
-  state, so it needs `s3:GetObject` alone. One role currently serves both jobs.
-- **A GitHub Environment approval gate on apply.** Free on public repos, adds a
-  human gate between merge and enforcement.
 - **Policy-as-code** (OPA/Conftest) for rules the type system cannot express —
   e.g. "no app may reach `payments-api` without a security review label".
-- **Scheduled drift detection.** `terraform plan -detailed-exitcode` on a cron,
-  opening an issue on exit 2. The checks already detect orphans on every plan;
-  this would catch them without waiting for someone to open a pull request.
-- **Automated decommissioning workflow** — the runbook in `docs/GOVERNANCE.md`
-  is written but executed by hand.
+- **Automated decommissioning workflow** — open the narrow-to-zero pull request
+  automatically once an app passes expiry, rather than relying on the owner to
+  act on the blocked plan.
+- **A machine user for the PAT.** The credential is currently tied to a human
+  account and carries `admin:org` across every organisation that account
+  belongs to. A dedicated machine user with org-owner rights and nothing else
+  would bound the blast radius. Environment gating limits *who can use* the
+  credential; it does nothing about *how much it can reach*.
+- **Per-team catalogue and state split**, at the point where a single plan
+  becomes slow or a single reviewer becomes a bottleneck.
+- **Permission-change detection.** This governs which repositories an app can
+  reach, not what it can do there. An app version bump that widens its
+  permission set is invisible to this configuration — see `docs/GOVERNANCE.md`
+  §6, point 4.

@@ -45,19 +45,22 @@ check "installations_are_declared" {
   }
 }
 
-check "app_reviews_are_current" {
+check "reviews_are_due_soon" {
+  // Expiry itself blocks, via the precondition in app_access.tf. This only
+  // gives owners advance warning so the deadline is not a surprise.
   assert {
     condition = length([
       for slug, app in var.app_catalogue :
-      slug if timecmp(plantimestamp(), "${app.review_by}T00:00:00Z") >= 0
+      slug if timecmp(timeadd(plantimestamp(), "${var.review_warning_days * 24}h"), "${app.review_by}T00:00:00Z") >= 0
     ]) == 0
 
     error_message = format(
-      "App(s) past their review_by date: %s. Re-confirm the owner still needs the access, then extend the date or begin decommissioning.",
+      "App(s) due for review within %d days: %s. Re-confirm the access is still needed before the date passes — after it, plans fail.",
+      var.review_warning_days,
       join(", ", [
         for slug, app in var.app_catalogue :
         "${slug} (owner: ${app.owner}, due ${app.review_by})"
-        if timecmp(plantimestamp(), "${app.review_by}T00:00:00Z") >= 0
+        if timecmp(timeadd(plantimestamp(), "${var.review_warning_days * 24}h"), "${app.review_by}T00:00:00Z") >= 0
       ])
     )
   }

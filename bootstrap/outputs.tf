@@ -8,7 +8,12 @@ output "lock_table" {
   value       = aws_dynamodb_table.lock.name
 }
 
-output "ci_role_arn" {
-  description = "Set as the AWS_ROLE_ARN repository variable in GitHub Actions."
-  value       = aws_iam_role.ci.arn
+output "plan_role_arn" {
+  description = "Set as the AWS_PLAN_ROLE_ARN repository variable. Read-only state access for untrusted PR code."
+  value       = aws_iam_role.plan.arn
+}
+
+output "apply_role_arn" {
+  description = "Set as the AWS_APPLY_ROLE_ARN repository variable. Read-write state access for applies from main."
+  value       = aws_iam_role.apply.arn
 }

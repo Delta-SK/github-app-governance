@@ -25,6 +25,17 @@ jobs:
     # than being skipped on purpose. Skip it on purpose.
     if: github.event.pull_request.head.repo.full_name == github.repository
 
+    # THIS JOB RUNS UNTRUSTED CODE. For pull_request events GitHub executes
+    # the workflow definition from the PR head, so anyone who can push a
+    # branch can rewrite the steps below. Two controls contain that:
+    #
+    #   1. TF_GITHUB_TOKEN lives in this environment, not in repository
+    #      secrets, and the environment has required reviewers. A human
+    #      releases the credential per run, after looking at the diff.
+    #   2. AWS_PLAN_ROLE_ARN grants s3:GetObject only. Even with the
+    #      credential, this job cannot write or delete state.
+    environment: plan
+
     defaults:
       run:
         working-directory: terraform
@@ -32,10 +43,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Configure AWS credentials (OIDC)
+      - name: Configure AWS credentials (OIDC, read-only state)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - uses: hashicorp/setup-terraform@v3

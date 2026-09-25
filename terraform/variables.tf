@@ -4,6 +4,12 @@ variable "github_org" {
   default     = "Delta-SK"
 }
 
+variable "review_warning_days" {
+  description = "How long before review_by to start warning on every plan. Expiry itself blocks; this is the advance notice."
+  type        = number
+  default     = 30
+}
+
 variable "repositories" {
   description = <<-EOT
     Repositories managed by this configuration. Public by design: the test org

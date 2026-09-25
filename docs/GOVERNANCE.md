@@ -77,17 +77,28 @@ the entries federate.
 
 ## 3. Review and expiry
 
-Every entry carries `review_by`. The `app_reviews_are_current` check fails on
+Every entry carries `review_by`. The precondition in `app_access.tf` fails on
 every plan once that date passes, naming the app and its owning team.
 
 The escalation ladder — increasing pressure, never a surprise:
 
-| When | What happens |
-| --- | --- |
-| `review_by` − 30 days | Warning surfaces on every plan |
-| `review_by` | Check fails on every plan; issue assigned to the owning team |
-| `review_by` + 30 days | Automated PR narrowing the app to zero repositories |
-| PR merged or overridden | Owner either defends the access or it lapses |
+| When | What happens | Status |
+| --- | --- | --- |
+| `review_by` − 30 days | Warning surfaces on every plan | **Implemented** — `reviews_are_due_soon` in `checks.tf` |
+| `review_by` | Plan **fails**; no change to any app can be applied until the entry is reconciled | **Implemented** — resource precondition in `app_access.tf` |
+| weekly, regardless | Reconciler raises an issue naming the app and owner | **Implemented** — `reconcile.yml` |
+| `review_by` + 30 days | Automated PR narrowing the app to zero repositories | Designed, not implemented |
+| PR merged or overridden | Owner either defends the access or it lapses | Follows from the above |
+
+Expiry is a **blocking** condition rather than a warning, and that choice is
+deliberate. A `check` block would let an expired app keep being applied
+indefinitely, which makes the review date decorative — the failure mode it is
+supposed to prevent. A resource precondition stops the plan.
+
+Note the asymmetry with orphan detection, which only warns. Stale data you own
+should block your own apply. An installation somebody else added should not
+block your unrelated change — that would teach people to route around the
+pipeline, which is worse than the orphan.
 
 The important inversion is at the bottom: **the default outcome is removal.**
 An owner who wants to keep access must act. In the common failure mode — the
@@ -124,9 +135,16 @@ setsubtract(
 )
 ```
 
-Non-empty means somebody installed something outside the process. It runs on
-**every plan**, so an orphan surfaces the next time anyone touches the
-configuration — no scheduled job required, no separate tooling to maintain.
+Non-empty means somebody installed something outside the process.
+
+It runs in two places, and it needs both:
+
+- **On every plan**, so an orphan surfaces the moment anyone touches the
+  configuration, in the pull request where they will see it.
+- **Weekly, on a schedule** (`reconcile.yml`), because detection cannot depend
+  on somebody happening to open a pull request. A quiet repository is exactly
+  where an orphan survives longest. The scheduled run opens a GitHub issue and
+  closes it automatically once the organisation matches the catalogue again.
 
 ### Triage
 

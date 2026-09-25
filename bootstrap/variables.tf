@@ -47,3 +47,18 @@ variable "lock_table" {
   type        = string
   default     = "delta-sk-tfstate-lock"
 }
+
+variable "platform_team_members" {
+  description = "GitHub usernames belonging to the platform-engineering team, which owns CODEOWNERS review."
+  type        = list(string)
+  default     = ["SergeyKirakosyan"]
+}
+
+variable "environment_reviewer_ids" {
+  description = <<-EOT
+    Numeric GitHub user IDs permitted to release the plan environment's
+    credentials. Numeric IDs, not usernames — the API takes IDs here.
+  EOT
+  type        = list(number)
+  default     = [53433049] # SergeyKirakosyan
+}

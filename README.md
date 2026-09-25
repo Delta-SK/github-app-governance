@@ -128,6 +128,25 @@ GitHub Actions assumes `github-app-governance-ci` via **OIDC**. No AWS keys are
 stored in GitHub. The role trusts exactly two subjects — `ref:refs/heads/main`
 and `pull_request` — on this repository only.
 
+**The OIDC subject claim is not the documented format.** GitHub issues it with
+immutable numeric IDs embedded:
+
+```
+repo:Delta-SK@333749275/github-app-governance@1387485403:ref:refs/heads/main
+```
+
+not the `repo:OWNER/REPO:ref:...` shown in most published examples. A trust
+policy written in the older form fails with `Not authorized to perform
+sts:AssumeRoleWithWebIdentity` and no indication of why.
+
+This is a security feature, not an annoyance: pinning the IDs means a deleted
+and recreated organisation or repository of the same name does **not** inherit
+the trust policy. `bootstrap/variables.tf` therefore pins `github_org_id` and
+`github_repo_id`, with the lookup commands in a comment there.
+
+To see the claim your own repository issues, dispatch a workflow that prints
+`$ACTIONS_ID_TOKEN_REQUEST_URL`'s decoded payload — faster than guessing.
+
 | Name | Kind | Value |
 | --- | --- | --- |
 | `TF_GITHUB_TOKEN` | secret | classic PAT (`repo`, `admin:org`) |
@@ -308,6 +327,13 @@ organisation.
 **The test org is on the GitHub Free plan**, so the managed repositories are
 **public** — branch protection is unavailable on private repositories on Free.
 On a paid plan, set `visibility = "private"` in `repositories.tf`.
+
+**Required reviews are not enforced on this repository.** `main` requires the
+`plan` status check to pass, but not an approving review — a single-account
+test organisation cannot approve its own pull requests, so requiring one would
+deadlock the demonstration. `.github/CODEOWNERS` is in place and is what would
+enforce review in a real organisation with more than one engineer. This is a
+constraint of the throwaway org, not a design choice.
 
 **This repository's own branch protection is not Terraform-managed.** Deliberate:
 if Terraform owned the required status checks on `main` and an apply half-failed,

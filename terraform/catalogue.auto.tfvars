@@ -1,0 +1,48 @@
+# ---------------------------------------------------------------------------
+# THE CATALOGUE — source of truth for GitHub App access in this organisation.
+#
+# Changing an app's `repositories` list and merging the pull request is the
+# only supported way to alter what an app can reach. Nothing here is set in
+# the GitHub UI.
+#
+# At organisation scale this file splits per owning team
+# (catalogue/<team>.auto.tfvars) with CODEOWNERS routing review. The schema
+# does not change; see docs/GOVERNANCE.md.
+# ---------------------------------------------------------------------------
+
+repositories = {
+  payments-api = {
+    description = "Payment processing service"
+    topics      = ["service", "payments"]
+  }
+
+  web-frontend = {
+    description = "Customer-facing web application"
+    topics      = ["frontend"]
+  }
+}
+
+app_catalogue = {
+  renovate = {
+    installation_id = "164801077"
+    owner           = "platform-engineering"
+    purpose         = "Automated dependency update pull requests"
+    justification   = "Keeps transitive dependencies patched without manual tracking; required by the supply-chain policy."
+    review_by       = "2027-03-31"
+    repositories = [
+      "payments-api",
+      "web-frontend",
+    ]
+  }
+
+  imgbot = {
+    installation_id = "164802659"
+    owner           = "web-team"
+    purpose         = "Lossless image compression pull requests"
+    justification   = "Reduces page weight on the marketing site. Only meaningful where images are served."
+    review_by       = "2027-01-31"
+    repositories = [
+      "web-frontend",
+    ]
+  }
+}

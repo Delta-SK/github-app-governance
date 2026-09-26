@@ -21,11 +21,8 @@ name: terraform-plan
 on:
   pull_request_target:
 
-permissions:
-  contents: read
-  pull-requests: write # the plan comment
-  statuses: write # the terraform-plan status on the pull request's head
-  id-token: write # OIDC to the read-only state role
+# Nothing at workflow level: each job requests exactly what it needs.
+permissions: {}
 
 concurrency:
   group: terraform-plan-${{ github.event.pull_request.number }}
@@ -38,6 +35,11 @@ jobs:
   plan:
     name: plan
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: write # the plan comment
+      statuses: write # the terraform-plan status on the pull request's head
+      id-token: write # OIDC to the read-only state role
 
     # Main only, no reviewer (bootstrap/github.tf). The credential is
     # reachable here because this definition can only come from main.

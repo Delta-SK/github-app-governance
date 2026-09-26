@@ -12,10 +12,8 @@ on:
     - cron: "0 7 * * 1" # Mondays 07:00 UTC
   workflow_dispatch:
 
-permissions:
-  contents: read
-  id-token: write
-  issues: write
+# Nothing at workflow level: each job requests exactly what it needs.
+permissions: {}
 
 env:
   AWS_REGION: eu-central-1
@@ -24,6 +22,10 @@ jobs:
   reconcile:
     name: reconcile
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+      issues: write
 
     # Runs from main, so it is trusted code — but it only ever reads. It takes
     # the production environment for the GitHub token and the read-only plan

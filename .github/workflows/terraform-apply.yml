@@ -11,9 +11,8 @@ on:
   # Manual trigger for re-running a failed apply without an empty commit.
   workflow_dispatch:
 
-permissions:
-  contents: read
-  id-token: write
+# Nothing at workflow level: each job requests exactly what it needs.
+permissions: {}
 
 # Never cancel a running apply: an interrupted apply can leave state locked
 # or partially written. Queue instead.
@@ -28,6 +27,9 @@ jobs:
   apply:
     name: apply
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
 
     # Runs code already merged to main, so it is trusted. The environment
     # admits main only rather than gating on a reviewer — the pull request

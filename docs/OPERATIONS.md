@@ -7,8 +7,8 @@ parts:
   you want an app installed, want it to reach another repository, got a
   "review due" message, or want to remove an app.
 - **[Part 2 — Platform team (support)](#part-2--platform-team-support):** you
-  approve plans, review catalogue changes, triage the weekly reconciliation
-  issue, and keep the pipeline itself healthy.
+  review catalogue changes, approve the occasional code plan, triage the
+  weekly reconciliation issue, and keep the pipeline itself healthy.
 
 Why the system exists and how it is designed: [README](../README.md) and
 [GOVERNANCE.md](GOVERNANCE.md). This page only covers *how to do things*.
@@ -36,13 +36,13 @@ Monday check and undone by the next apply.
 
 ---
 
-# Part 1 — App owners and requesters
+## Part 1 — App owners and requesters
 
 You need: membership of the org, and permission to open pull requests on
 `Delta-SK/github-app-governance`. You do **not** need Terraform, AWS, or any
 token. Everything below can be done in the GitHub web interface.
 
-## How any change works
+### How any change works
 
 Every change you make follows the same five steps.
 
@@ -50,21 +50,22 @@ Every change you make follows the same five steps.
    the file → pencil icon). When saving, choose **"Create a new branch for
    this commit and start a pull request"**.
 2. **Fill in the pull request template** — what changes, why, ticket number.
-3. **Wait for the plan.** The check called `plan` shows *Waiting* until a
-   platform engineer approves it (this releases the credential the plan needs
-   — see Part 2). Within a few minutes of approval a comment titled
-   **Terraform plan** appears with a summary table and the full plan.
-4. **Read the plan comment.** The table should say `success` for fmt,
-   validate, plan and destroy guard. Expand *Show plan* and check it shows
-   what you meant — lines with `+` are added, `-` removed.
+3. **Wait two minutes for the plan.** Nothing needs approving: two checks
+   start by themselves — `validate` (formatting and syntax) and
+   `terraform-plan`. A comment titled **Terraform plan — catalogue** appears
+   with a summary table and the full plan.
+4. **Read the plan comment.** The table should say `success` for plan and
+   destroy guard, and both checks should be green. Expand *Show plan* and
+   check it shows what you meant — lines with `+` are added, `-` removed.
 5. **Get a review and merge.** A member of `@Delta-SK/platform-engineering`
    approves. Merge with **Squash and merge**. The `terraform-apply` workflow
    (Actions tab) runs automatically and applies the change within minutes.
 
-If the plan fails, the comment and the red `plan` check say why — see
-[When your plan fails](#when-your-plan-fails).
+If the plan fails, the comment and the red `terraform-plan` check say why —
+see [When your plan fails](#when-your-plan-fails). A red `validate` check
+means formatting or syntax: its log shows the exact line.
 
-## Request a new app
+### Request a new app
 
 1. **Open a request.** Issues → New issue → **Request a GitHub App**. Fill in
    every field. Be specific about repositories: "All repositories" is never
@@ -98,7 +99,7 @@ If the plan fails, the comment and the red `plan` check say why — see
    [How any change works](#how-any-change-works). When the apply finishes,
    the app reaches exactly the listed repositories.
 
-## Give an app access to another repository
+### Give an app access to another repository
 
 1. Add the repository name to the app's `repositories` list.
 2. In the pull request, say why the app needs this repository.
@@ -110,7 +111,7 @@ The repository can be one this configuration creates (listed under
 repository in the org — just use its exact name. A misspelled name fails the
 plan with a message naming it.
 
-## Remove an app's access to one repository
+### Remove an app's access to one repository
 
 1. Delete the repository from the app's `repositories` list. At least one
    repository must remain — to remove the app entirely, see
@@ -118,7 +119,7 @@ plan with a message naming it.
 2. Follow [How any change works](#how-any-change-works). The plan shows the
    repository with a `-`.
 
-## Renew a review
+### Renew a review
 
 Every plan starts warning 30 days before an app's `review_by` date:
 *"App(s) due for review within 30 days: …"*.
@@ -138,7 +139,7 @@ Every plan starts warning 30 days before an app's `review_by` date:
 yours is renewed or quarantined. The weekly reconciliation issue will name
 your team.
 
-## Remove an app completely
+### Remove an app completely
 
 Removal happens in stages, so every step until the last can be undone.
 Allow two to three weeks end to end.
@@ -191,14 +192,14 @@ repositories.
 action only an org owner can take. Until it is done, plans show *"Decommissioned
 app(s) still installed"* — the reminder clears itself afterwards.
 
-## Change an app's owning team
+### Change an app's owning team
 
 Edit `owner` to the new team's slug (as in `github.com/orgs/Delta-SK/teams/<slug>`).
 Both teams should agree in the pull request. If the plan warns *"owner
 team(s) that do not exist"*, the slug is wrong or the team has not been
 created.
 
-## When your plan fails
+### When your plan fails
 
 | Message contains | What it means | What to do |
 | --- | --- | --- |
@@ -211,7 +212,8 @@ created.
 | `needs a purpose and a justification` / `named owning team` | A field is empty | Fill it in |
 | `both catalogued and tombstoned` | The app is in both files | Remove it from one |
 | `destroy guard` failure | You removed an app that is not quarantined yet | Do stage 1 first |
-| fmt `failure` | Formatting | A platform engineer can run `terraform fmt` for you, or copy the indentation of the entries around yours |
+| `validate` failed at *terraform fmt* | Formatting | The log shows the expected layout; copy the indentation of the entries around yours, or ask a platform engineer to run `terraform fmt` |
+| Warning `Value for undeclared variable` | The file sets something that is not catalogue data, such as `max_review_days` | Remove it. Policy settings live in `terraform/settings.tf` and change through the platform team |
 
 Warnings (⚠️ under *governance checks* in the plan comment) never block your
 pull request. They usually describe something elsewhere in the org, and the
@@ -219,33 +221,39 @@ platform team handles them.
 
 ---
 
-# Part 2 — Platform team (support)
+## Part 2 — Platform team (support)
 
-## Access you need
+### Access you need
 
 | What | Why | How to get it |
 | --- | --- | --- |
-| Member of `@Delta-SK/platform-engineering` | CODEOWNER reviews; approving plan runs | An org owner adds you in `bootstrap/variables.tf` (`platform_team_members`, and your numeric user ID in `environment_reviewer_ids`) and re-applies bootstrap |
+| Member of `@Delta-SK/platform-engineering` | CODEOWNER reviews; approving code plans (`plan-code`) | An org owner adds you to `platform_team_members` in `bootstrap/variables.tf` and re-applies bootstrap |
 | Org owner | Installing, suspending and uninstalling apps; break-glass | Org owners only |
 | `gh` CLI, logged in | Every command below | `gh auth login` |
-| Terraform 1.9, AWS read access to the state bucket, the classic PAT | Only for local inspection and rare state operations | Ask the credential owner. **Never paste the PAT into chat, a ticket, or a terminal that is being shared** |
+| Terraform at the version in `.terraform-version` (`tfenv install` / `mise install` read it), AWS read access to the state bucket, the classic PAT | Only for local inspection, bootstrap, and rare state operations | Ask the credential owner. **Never paste the PAT into chat, a ticket, or a terminal that is being shared** |
 
 Most of the job needs nothing but the GitHub web interface and `gh`.
 
-## Daily — 5 minutes
+### Daily — 5 minutes
 
-1. **Approve waiting plans.** Actions tab → runs marked *Waiting* →
-   **Review deployments**. Before approving, open the pull request's **Files
-   changed**:
-   - Only `terraform/*.tfvars` changed → approve.
-   - Anything under `.github/` or `scripts/`, or any `*.tf` file, changed →
-     **read every line first.** The plan job runs the pull request's own
-     code with the org-admin credential; approving is trusting that code.
-     If in doubt, do not approve — ask in the pull request.
+1. **Code plans waiting for approval.** Catalogue pull requests plan by
+   themselves. Only a pull request that changes code — `*.tf`, `scripts/`,
+   `.github/workflows/`, `.terraform-version` — starts a `terraform-plan-code`
+   run, which waits for you: Actions tab → run marked *Waiting* → **Review
+   deployments**. That run executes the pull request's own code with the
+   org-admin credential, so before approving:
+   - Open **Files changed** and **read every line** under `.github/` and
+     `scripts/`, and every `*.tf` change. Look for anything that sends data
+     anywhere, runs extra programs, or adds providers.
+   - If in doubt, do not approve — ask in the pull request. The automatic
+     catalogue plan is still there; only the code plan is withheld.
 2. **Review catalogue pull requests.** Use the reviewer checklist in the pull
    request template. In particular:
-   - The plan comment shows only the change described, and *destroy guard*
-     is `success` or `skipped`.
+   - The **Terraform plan — catalogue** comment shows only the change
+     described, *destroy guard* is `success`, and both checks are green.
+   - If that comment carries the ⚠️ *also changes code* note, the plan does
+     not show the code change: read the **Terraform plan — this pull
+     request's code** comment instead (step 1).
    - New app or new repository: the app's permissions (org **Settings →
      GitHub Apps → app → Configure**) are proportionate to the repositories
      it gains. `contents: write` on `payments-api` deserves a second look.
@@ -257,7 +265,7 @@ Most of the job needs nothing but the GitHub web interface and `gh`.
 4. **App requests.** Issues labelled `app-request`: review, reply, and if
    approved install the app (see [Install an approved app](#install-an-approved-app)).
 
-## Weekly — Monday, after 07:00 UTC
+### Weekly — Monday, after 07:00 UTC
 
 The `reconcile` workflow runs at 07:00 UTC. Then:
 
@@ -266,7 +274,7 @@ The `reconcile` workflow runs at 07:00 UTC. Then:
   below. Fix, then run the check again: `gh workflow run reconcile.yml
   -R Delta-SK/github-app-governance`. The issue closes itself when clean.
 
-### Triage a reconciliation issue
+#### Triage a reconciliation issue
 
 | Finding | What it means | What to do |
 | --- | --- | --- |
@@ -282,7 +290,7 @@ The `reconcile` workflow runs at 07:00 UTC. Then:
 | `check.reviews_are_due_soon` | Reviews due within 30 days | Nudge the owning teams; nothing to fix yet |
 | **This repository's own controls were weakened** | Someone changed branch protection, an environment, secrets or CODEOWNERS in the UI | Re-apply bootstrap (see [Change bootstrap](#change-bootstrap-teams-reviewers-branch-protection)); find out who and why |
 
-### Handle an orphan
+#### Handle an orphan
 
 1. Find the app: org **Settings → GitHub Apps**. Note which repositories it
    reaches and what permissions it holds.
@@ -299,7 +307,7 @@ The `reconcile` workflow runs at 07:00 UTC. Then:
      `repositories = ["app-quarantine"]` under your own team, then follow the
      normal removal stages. This gives you the reversible path.
 
-## Monthly
+### Monthly
 
 1. **Upcoming reviews:**
 
@@ -315,8 +323,20 @@ The `reconcile` workflow runs at 07:00 UTC. Then:
 3. **Token expiry:** check the classic PAT's expiry date (the token owner's
    **Settings → Developer settings → Personal access tokens**). Rotate at
    least two weeks before it expires.
+4. **Versions Dependabot does not manage** (the rest arrive as Dependabot
+   pull requests every Monday — review them like any code change):
+   - Terraform CLI: compare `.terraform-version` with the latest release
+     (`gh api repos/hashicorp/terraform/releases/latest --jq .tag_name`). To
+     upgrade, see [Upgrade Terraform](#upgrade-terraform).
+   - Runner image: every workflow uses `ubuntu-24.04`. When GitHub announces
+     its deprecation, move all workflows to the next LTS image in one pull
+     request. Never use `ubuntu-latest`.
+   - Run log warnings: open the latest `terraform-apply` run and check the
+     annotations. Any deprecation notice (an action runtime, a provider
+     argument, a Terraform feature) gets a pull request that month, not
+     when it breaks.
 
-## Install an approved app
+### Install an approved app
 
 1. Open the app's install page (Marketplace or the vendor's link) → install
    on **Delta-SK**.
@@ -330,7 +350,7 @@ The `reconcile` workflow runs at 07:00 UTC. Then:
 Until that pull request is merged, the app is an orphan in every plan. Merge
 it the same day.
 
-## Uninstall an app (removal stage 4)
+### Uninstall an app (removal stage 4)
 
 Only after the stage-3 (release) pull request is merged and applied.
 
@@ -346,18 +366,19 @@ Never uninstall an app that is still in the catalogue: Terraform cannot read
 an installation that no longer exists, and every plan in the org fails until
 state is repaired by hand.
 
-## Rotate the GitHub token
+### Rotate the GitHub token
 
 The pipeline uses one classic personal access token (`repo`, `admin:org`),
-stored as the secret `TF_GITHUB_TOKEN` in **two** environments.
+stored as the secret `TF_GITHUB_TOKEN` in **three** environments.
 
 1. The token's owner creates a new classic token with exactly `repo` and
    `admin:org`, with an expiry date.
-2. Store it in both environments — never as a repository secret:
+2. Store it in all three environments — never as a repository secret:
 
    ```bash
-   gh secret set TF_GITHUB_TOKEN --env plan       -R Delta-SK/github-app-governance
-   gh secret set TF_GITHUB_TOKEN --env production -R Delta-SK/github-app-governance
+   for env in plan plan-code production; do
+     gh secret set TF_GITHUB_TOKEN --env "$env" -R Delta-SK/github-app-governance
+   done
    ```
 
    (`gh` prompts for the value, so it never lands in shell history.)
@@ -369,16 +390,18 @@ If the token may have leaked: do all of the above **immediately**, then check
 the org audit log and this repository's Actions history for runs you do not
 recognise.
 
-## When an apply fails
+### When an apply fails
 
 1. Actions → the failed `terraform-apply` run → read the failing step.
 2. Common causes:
+
    | Step | Cause | Fix |
    | --- | --- | --- |
    | plan (plan of record) | Something changed between the PR plan and merge — usually an expired review | Fix via a new pull request |
    | plan guard | The merged change releases an un-quarantined app or deletes a repository | Revert the merge; follow the removal stages |
    | apply, `401` | Token expired or revoked | [Rotate the token](#rotate-the-github-token), then re-run |
    | apply, `Error acquiring the state lock` | Another apply is running, or one crashed | Wait for any running apply. If none is running, see below |
+
 3. Re-run once the cause is fixed: Actions → `terraform-apply` → **Run
    workflow** on `main`. The apply is safe to re-run; it recomputes the plan.
 
@@ -391,7 +414,30 @@ terraform init
 terraform force-unlock <LOCK_ID>     # the ID is printed in the error message
 ```
 
-## Stop managing a repository
+The lock is an object next to the state:
+`s3://delta-sk-tfstate-751569314116/github-app-governance/terraform.tfstate.tflock`.
+`force-unlock` deletes it; never delete it by hand while an apply might be
+running.
+
+### Upgrade Terraform
+
+Terraform is pinned to one exact version in `.terraform-version`, which every
+workflow and every engineer's version manager reads.
+
+1. Read the release notes between the current and the target version, looking
+   for backend, state or language changes.
+2. In a branch: change `.terraform-version`. If the minor version changes
+   (1.16 → 1.17), change `required_version` in `terraform/versions.tf` and
+   `bootstrap/main.tf` to match (`~> 1.17.0`).
+3. Locally, with the new version: `terraform init -upgrade` and
+   `terraform validate` in both directories; `terraform plan` in
+   `terraform/` must show no changes.
+4. Open the pull request. It is a code change, so approve its
+   `terraform-plan-code` run and check that plan shows no changes too.
+5. Merge. The next apply writes state with the new version; from then on
+   older binaries refuse it, so tell the team to upgrade.
+
+### Stop managing a repository
 
 The destroy guard refuses any plan that deletes a repository, by design. To
 take a repository out of Terraform without deleting it:
@@ -413,7 +459,7 @@ take a repository out of Terraform without deleting it:
 This is one of the few operations outside the pull request flow; record it
 in the pull request description.
 
-## Change bootstrap (teams, reviewers, branch protection)
+### Change bootstrap (teams, reviewers, branch protection)
 
 `bootstrap/` holds the controls on this repository itself: the
 `platform-engineering` team and its members, app-owning teams created for the
@@ -423,7 +469,7 @@ state backend and roles. CI never applies it.
 1. Open a pull request with the change. CI checks formatting and validation
    only; it does not plan bootstrap.
 2. After review and merge, an org owner with AWS administrator access applies
-   it from their machine:
+   it from their machine, with the Terraform version from `.terraform-version`:
 
    ```bash
    cd bootstrap
@@ -435,7 +481,7 @@ state backend and roles. CI never applies it.
 3. Verify: `gh workflow run reconcile.yml -R Delta-SK/github-app-governance`.
    The *repository controls* part must be clean.
 
-## Break-glass
+### Break-glass
 
 For when the pipeline cannot be used and waiting is worse than bypassing it.
 Every use is followed, the same day, by a pull request that makes the
@@ -451,7 +497,7 @@ After any break-glass action, run `gh workflow run reconcile.yml
 -R Delta-SK/github-app-governance` and make sure the resulting issue reflects
 exactly what you did — then close it out through the follow-up pull request.
 
-## Useful commands
+### Useful commands
 
 ```bash
 R=Delta-SK/github-app-governance

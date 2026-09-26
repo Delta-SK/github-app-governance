@@ -2,6 +2,7 @@
   Catalogue changes: fill in the section that matches your change and delete the rest.
   Step-by-step help: docs/OPERATIONS.md
 -->
+<!-- markdownlint-disable-file MD041 -- a pull request body has no title heading -->
 
 ## What changes
 
@@ -28,7 +29,7 @@
 
 ## Reviewer checklist
 
-- [ ] The plan comment shows only the changes described above
-- [ ] `destroy guard` is `success` or `skipped` in the plan comment
+- [ ] `validate` and `terraform-plan` are green
+- [ ] The **Terraform plan — catalogue** comment shows only the changes described above, and `destroy guard` is `success`
+- [ ] If that comment says the PR **also changes code**: every line under `.github/`, `scripts/` and `*.tf` has been read before approving the `terraform-plan-code` run, and its plan matches the intent
 - [ ] The app's permissions (org Settings → GitHub Apps → the app) are appropriate for the repositories it gains
-- [ ] Any change under `.github/` or `scripts/` has been read line by line — it can change the controls themselves

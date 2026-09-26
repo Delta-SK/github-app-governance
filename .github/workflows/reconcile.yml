@@ -18,13 +18,12 @@ permissions:
   issues: write
 
 env:
-  TF_VERSION: "1.9.0"
   AWS_REGION: eu-central-1
 
 jobs:
   reconcile:
     name: reconcile
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     # Runs from main, so it is trusted code — but it only ever reads. It takes
     # the production environment for the GitHub token and the read-only plan
@@ -36,21 +35,27 @@ jobs:
         working-directory: terraform
 
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read the pinned Terraform version
+        id: tf
+        run: echo "version=$(tr -d '[:space:]' < ../.terraform-version)" >> "$GITHUB_OUTPUT"
 
       - name: Configure AWS credentials (OIDC, read-only state)
-        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
         with:
-          terraform_version: ${{ env.TF_VERSION }}
+          terraform_version: ${{ steps.tf.outputs.version }}
           terraform_wrapper: false
 
       - name: terraform init
-        run: terraform init -input=false
+        run: terraform init -input=false -no-color
 
       - name: terraform plan
         id: plan
@@ -97,7 +102,7 @@ jobs:
         if: >-
           steps.plan.outputs.exitcode != '0' || steps.plan.outputs.failed_checks != '0' ||
           steps.controls.outputs.failed != '0'
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           EXITCODE: ${{ steps.plan.outputs.exitcode }}
           CONTROLS_FAILED: ${{ steps.controls.outputs.failed }}
@@ -165,7 +170,7 @@ jobs:
         if: >-
           steps.plan.outputs.exitcode == '0' && steps.plan.outputs.failed_checks == '0' &&
           steps.controls.outputs.failed == '0'
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
             const { data: open } = await github.rest.issues.listForRepo({

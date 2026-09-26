@@ -13,6 +13,10 @@
 # apply job trusts them. Editing them is editing a control.
 /scripts/                 @Delta-SK/platform-engineering
 
+# The Terraform version every job and every engineer runs. Changing it
+# changes the binary that holds the state.
+/.terraform-version       @Delta-SK/platform-engineering
+
 # CI is what enforces the GitOps flow. A change here can disable every other
 # control in this repository, including the plan that would have shown it.
 /.github/                 @Delta-SK/platform-engineering

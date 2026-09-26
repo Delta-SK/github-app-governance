@@ -53,7 +53,7 @@ data "github_repository" "external" {
   lifecycle {
     postcondition {
       condition     = self.repo_id != null
-      error_message = "Repository '${each.value}' is listed in app_catalogue but does not exist in ${var.github_org}. Check the spelling, or declare it in `repositories` if this configuration should create it."
+      error_message = "Repository '${each.value}' is listed in app_catalogue but does not exist in ${local.github_org}. Check the spelling, or declare it in `repositories` if this configuration should create it."
     }
   }
 }

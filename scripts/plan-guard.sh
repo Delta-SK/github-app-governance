@@ -24,7 +24,11 @@ set -euo pipefail
 
 plan_file=${1:?usage: plan-guard.sh <planfile>}
 plan_json=$(terraform show -json "$plan_file")
-quarantine=$(jq -r '.variables.quarantine_repository.value' <<<"$plan_json")
+quarantine=$(jq -r '.planned_values.outputs.quarantine_repository.value // empty' <<<"$plan_json")
+if [ -z "$quarantine" ]; then
+  echo "::error title=plan-guard::The plan has no quarantine_repository output; cannot evaluate the guard." >&2
+  exit 1
+fi
 
 violations=$(jq -r --arg q "$quarantine" '
   .resource_changes[]?

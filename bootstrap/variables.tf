@@ -42,25 +42,10 @@ variable "state_bucket" {
   default     = "delta-sk-tfstate-751569314116"
 }
 
-variable "lock_table" {
-  description = "DynamoDB table for state locking. Required because Terraform 1.9 predates S3 native locking (use_lockfile, 1.10+)."
-  type        = string
-  default     = "delta-sk-tfstate-lock"
-}
-
 variable "platform_team_members" {
   description = "GitHub usernames belonging to the platform-engineering team, which owns CODEOWNERS review."
   type        = list(string)
   default     = ["SergeyKirakosyan"]
-}
-
-variable "environment_reviewer_ids" {
-  description = <<-EOT
-    Numeric GitHub user IDs permitted to release the plan environment's
-    credentials. Numeric IDs, not usernames — the API takes IDs here.
-  EOT
-  type        = list(number)
-  default     = [53433049] # SergeyKirakosyan
 }
 
 variable "app_owner_teams" {

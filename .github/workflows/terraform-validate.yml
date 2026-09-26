@@ -1,0 +1,57 @@
+name: terraform-validate
+
+# Checks a pull request's OWN code — formatting, validity of both Terraform
+# configurations, shell scripts, Markdown — with no credentials of any kind: no
+# environment, no secrets, no OIDC, a read-only token. Safe to run on anything,
+# forks and Dependabot included. Required status check: `validate`.
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: terraform-validate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: validate
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read the pinned Terraform version
+        id: tf
+        run: echo "version=$(tr -d '[:space:]' < .terraform-version)" >> "$GITHUB_OUTPUT"
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ steps.tf.outputs.version }}
+          terraform_wrapper: false
+
+      - name: terraform fmt
+        run: terraform fmt -check -recursive -diff
+
+      # -backend=false: validation needs providers, not state. bootstrap/ is
+      # applied by hand and never planned in CI, so this is its only check.
+      - name: terraform validate
+        run: |
+          for dir in terraform bootstrap; do
+            echo "::group::$dir"
+            terraform -chdir="$dir" init -backend=false -input=false -no-color
+            terraform -chdir="$dir" validate -no-color
+            echo "::endgroup::"
+          done
+
+      # shellcheck is preinstalled on GitHub's Ubuntu images.
+      - name: shellcheck
+        run: shellcheck scripts/*.sh
+
+      # Rules and file set: .markdownlint-cli2.jsonc.
+      - name: markdownlint
+        uses: DavidAnson/markdownlint-cli2-action@21c1be1b93ad9ed58fa840aacc3f279cde2a72ff # v24.2.0

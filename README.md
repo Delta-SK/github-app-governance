@@ -23,36 +23,44 @@ approval, and `terraform apply` is the enforcement.
 
 ## Architecture
 
-```
+```text
 terraform/catalogue.auto.tfvars      <- source of truth: apps, owners, access
         |
         |  pull request
         v
-.github/workflows/terraform-plan.yml   fmt / validate / plan / guard -> PR comment
+terraform-validate.yml   PR's own code: fmt, validate, lint         (no credentials)
+terraform-plan.yml       main's code x PR's catalogue: plan, guard  (automatic)
+terraform-plan-code.yml  PR's own code: plan, guard  (only if code changed; approval)
         |
         |  review (CODEOWNERS) + merge to main
         v
-.github/workflows/terraform-apply.yml  plan of record -> guard -> apply that plan
+terraform-apply.yml      plan of record -> guard -> apply that plan
         |
         v
 GitHub org: app installation repository access
-State: s3://delta-sk-tfstate-751569314116 (DynamoDB lock)
+State: s3://delta-sk-tfstate-751569314116 (S3-native lock)
 
-.github/workflows/reconcile.yml        weekly: plan + checks + repo controls
-                                       -> opens / updates / closes one issue
+reconcile.yml            weekly: plan + checks + repo controls
+                         -> opens / updates / closes one issue
 ```
 
 | Path | Purpose |
 | --- | --- |
 | `terraform/catalogue.auto.tfvars` | The catalogue. Apps, owners, review dates, repo access |
 | `terraform/decommissioned.auto.tfvars` | Tombstones: apps removed, when, and why |
+| `terraform/settings.tf` | Policy settings (org, review horizon, quarantine repo) — code, deliberately not variables |
 | `terraform/app_access.tf` | Enforces repo access per app; preconditions for expiry, review horizon, installation ID |
 | `terraform/repositories.tf` | Repositories (including the quarantine repository) and their branch protection |
 | `terraform/checks.tf` | Warnings: orphans, tombstoned apps reinstalled, ghost owners, suspensions, reviews due |
 | `terraform/data.tf` | Live inventory: installations, teams, externally managed repositories |
+| `scripts/take-pr-catalogue.sh` | Takes a pull request's catalogue files — and nothing else — for the automatic plan |
+| `scripts/plan-report.sh` | Plan, checks and guard, rendered as the pull request comment |
 | `scripts/plan-guard.sh` | Refuses plans that would release an un-quarantined app or delete a repository |
 | `scripts/verify-repo-controls.sh` | Checks this repository's own branch protection, environments, secrets, CODEOWNERS |
 | `bootstrap/` | State backend, OIDC roles, this repo's branch protection, environments, teams. Applied by hand |
+| `.terraform-version` | The one exact Terraform version, for CI and for every engineer |
+| `.github/dependabot.yml` | Keeps pinned actions and providers current |
+| `.markdownlint-cli2.jsonc` | Markdown rules for the docs, enforced in CI |
 | `docs/GOVERNANCE.md` | The operating model: ownership, review, expiry, orphans, decommissioning, scale |
 | `docs/OPERATIONS.md` | Step-by-step daily guide, for app owners and for the platform team |
 
@@ -69,7 +77,9 @@ CODEOWNERS routing review per team. The schema does not change.
 
 ## Prerequisites
 
-- Terraform `~> 1.9.0`
+- Terraform, exactly the version in [`.terraform-version`](.terraform-version)
+  (currently 1.16.4). `tfenv`, `tfswitch` and `mise` pick it up
+  automatically; `terraform/versions.tf` refuses anything outside 1.16.x
 - An AWS account (state backend) with credentials available locally
 - A GitHub organisation where you are an **owner**
 - A **classic** personal access token with `repo` and `admin:org` scopes.
@@ -94,7 +104,7 @@ obvious.
 
 `github_app_installation_repositories` calls these endpoints:
 
-```
+```text
 GET    /user/installations/{installation_id}/repositories
 PUT    /user/installations/{installation_id}/repositories/{repository_id}
 DELETE /user/installations/{installation_id}/repositories/{repository_id}
@@ -160,64 +170,89 @@ For production, in order of preference:
 
 ### The trust boundary
 
-The single most important thing to understand about this CI setup: **the plan
-job runs untrusted code.**
+The credential is an organisation-admin PAT, and GitHub offers nothing weaker
+that can read installation access (see *Fine-grained PATs do not work*). So
+the whole CI design comes down to one rule:
 
-For `pull_request` events GitHub executes the workflow definition from the
-*pull request head*, not from `main`. Anyone who can push a branch can rewrite
-the plan job and have it run whatever they like — before any review exists,
-because the job starts the moment the PR opens. Required reviews do not help
-here; the attacker never needs the pull request merged.
+> **The credential only ever meets code that is already on `main`, or code a
+> human has approved. Pull request *data* may reach it; pull request *code*
+> may not — unless someone looked first.**
 
-Since this repository's credential is an org-owner PAT, that path has to be
-closed structurally rather than procedurally. Two controls do it:
+The obvious setup breaks that rule. For `pull_request` events GitHub runs the
+workflow definition from the *pull request head*: anyone who can push a branch
+can rewrite the plan job and have it do anything with the credential, the
+moment the pull request opens. The previous version of this repository closed
+that with a reviewer gate on every plan — safe, but every catalogue change
+then sat waiting for a human to click *approve* before anyone could see its
+plan.
+
+The current design separates **code** from **data** instead:
+
+| Workflow | Trigger | Runs whose code | On what data | Credential | Approval |
+| --- | --- | --- | --- | --- | --- |
+| `terraform-validate` | `pull_request` | the PR's | the PR's | **none** | no |
+| `terraform-plan` | `pull_request_target` | **main's** | the PR's `*.auto.tfvars` | yes | **no** |
+| `terraform-plan-code` | `pull_request`, code paths only | the PR's | the PR's | yes | **yes** (`plan-code`) |
+| `terraform-apply` | push to `main` | main's | main's | yes (write) | no — the PR was the gate |
+| `reconcile` | weekly | main's | main's | yes | no |
+
+Why `terraform-plan` is safe without approval:
+
+- `pull_request_target` runs the workflow **as it is on `main`**, in a checkout
+  of `main`. A pull request cannot change what this job does.
+- The only thing it takes from the pull request is the catalogue files, as
+  plain file contents fetched by exact commit through the API
+  (`scripts/take-pr-catalogue.sh`). Variable-definition files are pure data —
+  HCL forbids function calls and references in them — so they cannot execute
+  anything. Symlinks are refused rather than followed.
+- The *rules* that judge the catalogue are locals in `terraform/settings.tf`,
+  not variables. A catalogue file therefore cannot set `max_review_days =
+  99999` or point the plan at another organisation: Terraform ignores
+  undeclared variables with a warning. (Verified: a catalogue carrying both
+  still fails the review-horizon precondition.)
+- Its environment, `plan`, admits `main` only, so the credential cannot be
+  reached by any other workflow definition.
+
+What it cannot do: show the effect of a pull request's **code** changes,
+because it deliberately runs `main`'s code. Such pull requests are rare,
+made by the platform team, and get two things: the automatic plan says so in
+its comment, and `terraform-plan-code` plans their own code once a
+platform-engineering reviewer approves the `plan-code` environment. That is
+the one approval left, and it sits exactly where running unreviewed code
+with an admin credential would otherwise happen.
+
+Supporting controls:
 
 | Control | Effect |
 | --- | --- |
-| `TF_GITHUB_TOKEN` lives in the `plan` **environment**, with required reviewers | The credential is released per run, by a human who has seen the diff. It is not a repository secret, so no job can read it implicitly |
-| Plan assumes a **read-only** AWS role (`s3:GetObject` only) | Even holding the credential, the job cannot write or delete Terraform state |
+| `TF_GITHUB_TOKEN` exists only as an **environment** secret | No job can read it implicitly; there are no repository-level secrets (`gh secret list` returns nothing) |
+| `plan` and `production` admit **`main` only**, admin bypass off | Protecting another branch later cannot silently widen who reaches the credential |
+| `plan-code` requires the **platform-engineering team**, admin bypass off | Whoever is on the team can release a run; leaving the team revokes it |
+| Every plan assumes a **read-only** AWS role | Plans cannot write or delete state. Only apply, from `main`, can |
+| Actions pinned to **commit SHAs**, Dependabot keeps them current | A moved tag cannot swap the code that runs beside the credential |
+| CODEOWNERS on `.github/`, `scripts/`, `terraform/`, `bootstrap/`, `.terraform-version` | Every change to a control is reviewed by the platform team |
 
-**Be precise about what "read-only plan" means: it is read-only for AWS state
-only.** The GitHub credential released to the plan environment is the same
-full-write, `admin:org` classic PAT that apply uses. GitHub offers no weaker
-credential that can read installation repository access (see *Fine-grained
-PATs do not work*), so the plan job genuinely holds the power to modify the
-organisation directly.
+**Required status checks are evidence, not a boundary.** `validate` runs the
+pull request's own workflow file, and a commit status such as
+`terraform-plan` can be posted by anyone with write access. They catch
+mistakes; they do not stop an attacker. The boundaries are the trust rule
+above, CODEOWNER review, and the apply job, which re-plans and re-runs the
+guard from `main`, where pull request code cannot reach.
 
-The approval gate is therefore the whole of the control, not a second layer
-behind a scoped token. One approved malicious run is sufficient. That places
-real weight on the reviewer actually reading the diff before approving —
-including the workflow file itself, since a pull request can change it.
+`terraform-plan` reports through a **commit status** named `terraform-plan`
+on the pull request's head commit, not through its job's check run:
+`pull_request_target` runs against the base commit, and its check run is not
+guaranteed to attach to the head, so it could never reliably satisfy a
+required check.
 
-Two further consequences worth naming rather than discovering:
-
-- Third-party actions are **pinned to commit SHAs**, not tags. `@v4` is a
-  moving reference; a compromised `setup-terraform` release would otherwise
-  hand this job a trojaned Terraform binary alongside an org-owner token.
-- `.github/` and `scripts/` are covered by CODEOWNERS, because a pull request
-  that edits the workflow is editing the control that would have shown you the
-  edit.
-- The `plan` status check and the plan comment are therefore **evidence, not a
-  boundary**: a pull request can rewrite the job that produces them. The
-  boundary is the environment approval plus the CODEOWNER review of any
-  `.github/` or `scripts/` change — and the apply job, which re-plans and
-  re-runs the guard from `main`, where pull request code cannot reach.
-
-There are **no repository-level secrets** in this repo — verify with
-`gh secret list`, which returns nothing. Everything is environment-scoped.
-
-Apply is a different case: it runs code already merged to `main`, which has
-been through review. Its environment pins the credential to protected branches
-rather than gating on a reviewer, because the pull request was the gate.
-
-**Apply does not reuse the pull request's plan — deliberately.** That plan was
-produced by the job running untrusted code; applying an artifact it wrote
-would give pull request code a path to the apply credential. Instead the apply
-job computes a *plan of record* from `main`, logs it, runs the destroy guard on
-it, and applies exactly that saved plan. The PR plan is a preview. Because
-branch protection requires branches to be up to date before merging, the two
-differ only if the organisation drifted in between — and the plan of record,
-in the apply log, is what actually happened.
+**Apply does not reuse any pull request plan — deliberately.** The automatic
+plan ran against `main` as it was when the pull request was last pushed; the
+code plan ran pull request code, and nothing that job produced may reach the
+apply credential. The apply job computes a *plan of record* from `main`, logs
+it, runs the destroy guard on it, and applies exactly that saved plan. Branch
+protection requires branches to be up to date, so the plans differ only if the
+organisation drifted in between — and the plan of record, in the apply log,
+is what actually happened.
 
 ### AWS
 
@@ -226,8 +261,8 @@ GitHub.
 
 | Role | Trusted subject | Permissions |
 | --- | --- | --- |
-| `github-app-governance-plan` | `:environment:plan`, `:environment:production` | `s3:GetObject` on the main state key |
-| `github-app-governance-apply` | `:environment:production` | `s3:GetObject` + `s3:PutObject` on the main state key, DynamoDB lock |
+| `github-app-governance-plan` | `:environment:plan`, `:environment:plan-code`, `:environment:production` | `s3:GetObject` on the main state key |
+| `github-app-governance-apply` | `:environment:production` | `s3:GetObject` + `s3:PutObject` on the main state key; get/put/delete on its `.tflock` lock object |
 
 Declaring `environment:` on a job **replaces** the `:pull_request` /
 `:ref:refs/heads/main` portion of the subject claim with
@@ -244,13 +279,18 @@ state; it still cannot write anything.
 Both roles are scoped to `github-app-governance/terraform.tfstate`
 specifically, **not** `bucket/*`. `bootstrap.tfstate` holds the OIDC roles,
 this repository's branch protection and the reviewing team — CI must not be
-able to rewrite the controls that constrain it. Neither role has
-`s3:DeleteObject`.
+able to rewrite the controls that constrain it. Neither role can delete
+state; the apply role can delete only its own lock object.
+
+**Locking is S3-native** (`use_lockfile = true`): the lock is a
+`terraform.tfstate.tflock` object written with a conditional put next to the
+state. It replaced a DynamoDB table, which Terraform has deprecated for this
+purpose. Plans run with `-lock=false`, so only apply ever takes the lock.
 
 **The OIDC subject claim is not the documented format.** GitHub issues it with
 immutable numeric IDs embedded:
 
-```
+```text
 repo:Delta-SK@333749275/github-app-governance@1387485403:ref:refs/heads/main
 ```
 
@@ -268,7 +308,7 @@ To see the claim your own repository issues, dispatch a workflow that prints
 
 | Name | Kind | Scope | Value |
 | --- | --- | --- | --- |
-| `TF_GITHUB_TOKEN` | secret | **environment** `plan` + `production` | classic PAT (`repo`, `admin:org`) |
+| `TF_GITHUB_TOKEN` | secret | **environment** `plan`, `plan-code` and `production` | classic PAT (`repo`, `admin:org`) |
 | `AWS_PLAN_ROLE_ARN` | variable | repository | read-only state role |
 | `AWS_APPLY_ROLE_ARN` | variable | repository | read-write state role |
 
@@ -288,10 +328,11 @@ terraform init
 terraform apply
 ```
 
-Creates the S3 bucket, the DynamoDB lock table, the GitHub OIDC provider, both
-CI roles, the `platform-engineering` team, the app-owning teams listed in
-`app_owner_teams`, this repository's branch protection, and the two Actions
-environments.
+Creates the S3 state bucket (versioned, encrypted, TLS-only, locking
+S3-native), the GitHub OIDC provider, both CI roles, the
+`platform-engineering` team, the app-owning teams listed in
+`app_owner_teams`, this repository's branch protection, and the three Actions
+environments (`plan`, `plan-code`, `production`).
 
 Bootstrap needs AWS administrator credentials and the classic PAT, and it is
 **not** run by CI — see *Limitations* for why, and for what checks it instead.
@@ -311,9 +352,15 @@ chicken-and-egg step in the setup, and it only happens once.
 Copy the outputs into `terraform/versions.tf` (backend block) and into the
 repository variables `AWS_PLAN_ROLE_ARN` and `AWS_APPLY_ROLE_ARN`.
 
-`TF_GITHUB_TOKEN` must be set as an **environment** secret on both `plan` and
-`production` — not as a repository secret. A repository secret is readable by
-every job, which would defeat the reviewer gate on `plan`.
+`TF_GITHUB_TOKEN` must be set as an **environment** secret on `plan`,
+`plan-code` and `production` — never as a repository secret, which every job
+could read, including one a pull request rewrote:
+
+```bash
+for env in plan plan-code production; do
+  gh secret set TF_GITHUB_TOKEN --env "$env" -R <org>/<repo>   # prompts for the value
+done
+```
 
 ### 2. Install the apps
 
@@ -370,12 +417,13 @@ Narrowing Renovate from two repositories to one:
    }
    ```
 
-2. Open a pull request. The plan job waits for a platform engineer to approve
-   the `plan` environment (that releases the credential), then runs `fmt`,
-   `validate` (this configuration and `bootstrap/`), `plan` and the destroy
-   guard, and posts a summary table plus the plan as a PR comment:
+2. Open a pull request. Two checks start at once, with nobody approving
+   anything: `validate` (fmt, validate, shellcheck and markdownlint on the
+   pull request's own files) and `terraform-plan` (main's code planned against this catalogue,
+   plus the destroy guard). Within a couple of minutes the plan is posted as
+   a PR comment with a summary table:
 
-   ```
+   ```text
    ~ resource "github_app_installation_repositories" "this["renovate"]" {
        ~ selected_repositories = [
            - "web-frontend",
@@ -485,9 +533,10 @@ apply — after review rather than during it.
 **How these were verified.** The live configuration plans clean against the
 test org with every check passing. Each blocking control and each warning was
 then exercised by planning against the same org with a deliberately broken
-catalogue (a `-var-file` override, plan only): all eleven cases failed or
-warned with the expected message, and the guard was run against the resulting
-saved plans. Expiry blocking and the reconciler issue flow were exercised in
+catalogue (a `-var-file` override, plan only, Terraform 1.16.4): all
+thirteen cases — including one that tries to override `max_review_days` and
+`github_org` from a catalogue file — failed or warned with the expected
+message, and the guard was run against the resulting saved plans. Expiry blocking and the reconciler issue flow were exercised in
 CI (issue #3). To see the orphan path end to end, install any app without
 cataloguing it and run `gh workflow run reconcile.yml`.
 
@@ -505,12 +554,12 @@ them from the file.
 
 | File | Values | Notes |
 | --- | --- | --- |
-| `bootstrap/variables.tf` | `github_org`, `github_repo`, **`github_org_id`**, **`github_repo_id`**, `state_bucket`, `lock_table`, `aws_region` | The numeric IDs go into the OIDC trust policy; get them with the `curl` commands in the file's comments. They produce the least helpful error if wrong (see *Authentication*). The bucket name must be globally unique |
-| `bootstrap/variables.tf` | `platform_team_members`, `environment_reviewer_ids`, `app_owner_teams` | Reviewer IDs are numeric user IDs: `gh api users/<login> --jq .id` |
-| `bootstrap/main.tf` and `terraform/versions.tf` | `backend "s3"` `bucket`, `region`, `dynamodb_table` | Same values as above, in both files |
+| `bootstrap/variables.tf` | `github_org`, `github_repo`, **`github_org_id`**, **`github_repo_id`**, `state_bucket`, `aws_region` | The numeric IDs go into the OIDC trust policy; get them with the `curl` commands in the file's comments. They produce the least helpful error if wrong (see *Authentication*). The bucket name must be globally unique |
+| `bootstrap/variables.tf` | `platform_team_members`, `app_owner_teams` | Team members review catalogue changes and approve code plans |
+| `bootstrap/main.tf` and `terraform/versions.tf` | `backend "s3"` `bucket`, `region` | Same values as above, in both files |
 | `.github/workflows/*.yml` | `AWS_REGION` | Must match the backend region |
-| Repository settings | variables `AWS_PLAN_ROLE_ARN`, `AWS_APPLY_ROLE_ARN`; secret `TF_GITHUB_TOKEN` in **both** environments | Role ARNs are bootstrap outputs. Never a repository-level secret |
-| `terraform/variables.tf` | `github_org` | Or pass `-var github_org=...` |
+| Repository settings | variables `AWS_PLAN_ROLE_ARN`, `AWS_APPLY_ROLE_ARN`; secret `TF_GITHUB_TOKEN` in **all three** environments | Role ARNs are bootstrap outputs. Never a repository-level secret |
+| `terraform/settings.tf` | `github_org` | A local, not a variable — see *The trust boundary* |
 | `terraform/catalogue.auto.tfvars` | `repositories`, every `installation_id` and `owner` | IDs are per installation and never carry over — see *Setup* step 3 |
 | `terraform/decommissioned.auto.tfvars` | tombstones | Start from `{}` |
 | `.github/CODEOWNERS` | `@Delta-SK/...` | The team must exist and be visible, or CODEOWNERS silently routes nothing (the reconciler checks) |
@@ -524,9 +573,28 @@ For a quick local look without CI, override the backend instead of editing it:
 terraform init -reconfigure \
   -backend-config="bucket=your-bucket" \
   -backend-config="key=github-app-governance/terraform.tfstate" \
-  -backend-config="region=your-region" \
-  -backend-config="dynamodb_table=your-lock-table"
+  -backend-config="region=your-region"
 ```
+
+---
+
+## Versions and pinning
+
+Nothing that runs here floats. Every version is pinned in exactly one place,
+and everything that can be kept current automatically is.
+
+| What | Pinned to | Where | Kept current by |
+| --- | --- | --- | --- |
+| Terraform CLI | 1.16.4 exactly | `.terraform-version` (CI reads it; so do `tfenv`, `tfswitch`, `mise`) | Hand — [OPERATIONS.md](docs/OPERATIONS.md), *Monthly* |
+| Terraform CLI range | `~> 1.16.0` | `required_version` in both configurations | Moves with the line above |
+| Providers | exact versions + hashes for linux/darwin × amd64/arm64 | `.terraform.lock.hcl` in both configurations | Dependabot (`terraform`) |
+| Provider ranges | `integrations/github ~> 6.13`, `hashicorp/aws ~> 6.0` | `required_providers` | Dependabot |
+| GitHub Actions | full commit SHA, version in a trailing comment | every `uses:` | Dependabot (`github-actions`), one-week cooldown |
+| Runner image | `ubuntu-24.04` | every `runs-on:` | Hand — never `ubuntu-latest`, which moves to a new OS under you |
+| State locking | S3-native `use_lockfile` | both `backend "s3"` blocks | — (replaced the deprecated DynamoDB lock) |
+
+All actions run on Node.js 24; none is on a deprecated runtime. `.terraform/`
+is never committed; lock files always are.
 
 ---
 
@@ -588,8 +656,21 @@ does not permit self-approval. Merges here therefore use the org-owner bypass.
 The control is correctly configured and would function normally with a second
 engineer; it simply cannot be *demonstrated* satisfying itself. Adding one more
 account to the org is the only real fix. The same account also approves its
-own `plan` environment runs; with a real team, enable *prevent self-review* on
-that environment.
+own `plan-code` runs; with a real team, set `prevent_self_review = true` on
+that environment in `bootstrap/github.tf`.
+
+**Code changes are planned only after an approval.** Catalogue pull requests
+plan automatically, but a pull request that changes Terraform code, scripts,
+workflows or the Terraform version gets its *own* plan only once a platform
+engineer approves the `plan-code` run. That is the price of never running
+unreviewed code next to an admin credential. Such pull requests are rare and
+come from the platform team, who can also plan them locally.
+
+**`terraform-plan` is a `pull_request_target` workflow.** It is safe because
+it never runs pull request code — and it stays safe only while that remains
+true. A future edit that checks out and runs anything from the pull request
+would hand the admin credential to every branch. The file says so at the top,
+and CODEOWNERS routes every change to it to the platform team.
 
 **Organisation owners can bypass branch protection** (`enforce_admins` is
 false), so a determined admin can push to `main` without a plan. That mirrors

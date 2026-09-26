@@ -58,8 +58,11 @@ Every change you make follows the same five steps.
    destroy guard, and both checks should be green. Expand *Show plan* and
    check it shows what you meant — lines with `+` are added, `-` removed.
 5. **Get a review and merge.** A member of `@Delta-SK/platform-engineering`
-   approves. Merge with **Squash and merge**. The `terraform-apply` workflow
-   (Actions tab) runs automatically and applies the change within minutes.
+   other than you approves — the rules on `main` require an approval of your
+   latest push from someone who did not make it, and apply to everyone,
+   administrators included. Merge with **Squash and merge** (the only method
+   allowed). The `terraform-apply` workflow (Actions tab) runs automatically
+   and applies the change within minutes.
 
 If the plan fails, the comment and the red `terraform-plan` check say why —
 see [When your plan fails](#when-your-plan-fails). A red `validate` check
@@ -77,9 +80,10 @@ means formatting or syntax: its log shows the exact line.
    the app choosing **"Only select repositories"** and a single repository
    from your list. From this moment until step 5 is merged, the app shows as
    *undeclared* in plans — that is expected; keep the gap short.
-4. **Get the installation ID.** The platform engineer posts it on the issue.
-   (It is the number at the end of the app's Configure page URL:
-   `github.com/organizations/Delta-SK/settings/installations/<ID>`.)
+4. **Get the installation ID and permissions.** The platform engineer posts
+   both on the issue. (The ID is the number at the end of the app's Configure
+   page URL, `github.com/organizations/Delta-SK/settings/installations/<ID>`;
+   the permissions are listed on the same page.)
 5. **Open the catalogue pull request.** Add an entry under `app_catalogue`:
 
    ```hcl
@@ -92,6 +96,11 @@ means formatting or syntax: its log shows the exact line.
      repositories = [
        "web-frontend",
      ]
+     permissions = {                         # exactly as posted in step 4
+       issues        = "write"
+       metadata      = "read"
+       pull_requests = "write"
+     }
    }
    ```
 
@@ -126,9 +135,10 @@ Every plan starts warning 30 days before an app's `review_by` date:
 
 1. Check the app is still needed, still used, and still needs every
    repository it has. Remove any it does not.
-2. Check its permissions have not grown: org **Settings → GitHub Apps → the
-   app → Configure** lists what it can do. If they have, say so in the pull
-   request.
+2. Check its permissions are still what the org approved. If they have
+   changed, every plan already says so (*"Installed permissions differ from
+   the catalogue"*); decide whether the app still deserves them, and update
+   its `permissions` in the same pull request, saying why.
 3. Set `review_by` to a new date — at most one year from today; sooner for
    apps with write access to sensitive repositories.
 4. Follow [How any change works](#how-any-change-works). In the pull request,
@@ -227,7 +237,7 @@ platform team handles them.
 
 | What | Why | How to get it |
 | --- | --- | --- |
-| Member of `@Delta-SK/platform-engineering` | CODEOWNER reviews; approving code plans (`plan-code`) | An org owner adds you to `platform_team_members` in `bootstrap/variables.tf` and re-applies bootstrap |
+| Member of `@Delta-SK/platform-engineering` | CODEOWNER reviews; approving code plans (`plan-code`) | An org owner adds you to `platform_team_members` in `bootstrap/variables.tf` (as `member`) and re-applies bootstrap. You receive an organisation invitation; you can review once you accept it |
 | Org owner | Installing, suspending and uninstalling apps; break-glass | Org owners only |
 | `gh` CLI, logged in | Every command below | `gh auth login` |
 | Terraform at the version in `.terraform-version` (`tfenv install` / `mise install` read it), AWS read access to the state bucket, the classic PAT | Only for local inspection, bootstrap, and rare state operations | Ask the credential owner. **Never paste the PAT into chat, a ticket, or a terminal that is being shared** |
@@ -247,6 +257,8 @@ Most of the job needs nothing but the GitHub web interface and `gh`.
      anywhere, runs extra programs, or adds providers.
    - If in doubt, do not approve — ask in the pull request. The automatic
      catalogue plan is still there; only the code plan is withheld.
+   - You cannot approve a code plan for code you pushed yourself; another
+     team member has to.
 2. **Review catalogue pull requests.** Use the reviewer checklist in the pull
    request template. In particular:
    - The **Terraform plan — catalogue** comment shows only the change
@@ -287,8 +299,9 @@ The `reconcile` workflow runs at 07:00 UTC. Then:
 | `check.tombstones_are_uninstalled` | A removed app is still — or again — installed. The message says why it was removed | Just after a stage-3 merge: finish the uninstall. Otherwise: someone reinstalled it; talk to them, then uninstall or re-catalogue it via pull request |
 | `check.owners_are_real_teams` | An owner team was deleted or renamed | Find the successor team; open a pull request changing `owner` |
 | `check.no_suspended_installations` | A catalogued app was suspended outside the removal process | Find out why. Either unsuspend or start its removal |
+| `check.permissions_match_catalogue` | An app's live permissions differ from its approved `permissions` — usually an owner accepted an app update asking for more | Find who accepted it (org audit log on Enterprise; otherwise ask the owners). Then either a pull request recording the new permissions, with the reason, approved by the owning team — or quarantine the app |
 | `check.reviews_are_due_soon` | Reviews due within 30 days | Nudge the owning teams; nothing to fix yet |
-| **This repository's own controls were weakened** | Someone changed branch protection, an environment, secrets or CODEOWNERS in the UI | Re-apply bootstrap (see [Change bootstrap](#change-bootstrap-teams-reviewers-branch-protection)); find out who and why |
+| **This repository's own controls were weakened** | Someone changed the ruleset on `main`, an environment, secret scanning, private vulnerability reporting, secrets or CODEOWNERS in the UI — or a break-glass bypass was never removed | Re-apply bootstrap (see [Change bootstrap](#change-bootstrap-teams-reviewers-rules-on-main)); find out who and why |
 
 #### Handle an orphan
 
@@ -346,9 +359,16 @@ The `reconcile` workflow runs at 07:00 UTC. Then:
 2. Choose **Only select repositories** and pick **one** repository from the
    approved list — the least sensitive. Terraform sets the full list later.
 3. Open org **Settings → GitHub Apps → the app → Configure** and copy the
-   number at the end of the URL. That is the installation ID.
-4. Post the ID on the request issue. The requester (or you) opens the
-   catalogue pull request.
+   number at the end of the URL. That is the installation ID. Or, for the ID
+   and the exact permissions in catalogue form:
+
+   ```bash
+   gh api orgs/Delta-SK/installations \
+     --jq '.installations[] | select(.app_slug == "<slug>") | {id, permissions}'
+   ```
+
+4. Post the ID and permissions on the request issue. The requester (or you)
+   opens the catalogue pull request.
 
 Until that pull request is merged, the app is an orphan in every plan. Merge
 it the same day.
@@ -462,12 +482,15 @@ take a repository out of Terraform without deleting it:
 This is one of the few operations outside the pull request flow; record it
 in the pull request description.
 
-### Change bootstrap (teams, reviewers, branch protection)
+### Change bootstrap (teams, reviewers, rules on main)
 
-`bootstrap/` holds the controls on this repository itself: the
-`platform-engineering` team and its members, app-owning teams created for the
-demo, the environments and their reviewers, branch protection, and the AWS
-state backend and roles. CI never applies it.
+`bootstrap/` holds the controls on this repository itself: its settings
+(merge methods, secret scanning, push protection, private vulnerability
+reporting), the ruleset on `main`, the `platform-engineering` team and its
+members, app-owning teams created for the demo, the environments and their
+reviewers, the automation labels, and the AWS state backend and roles. CI
+never applies it — the pipeline must not be able to rewrite the rules that
+constrain it.
 
 1. Open a pull request with the change. CI checks formatting and validation
    only; it does not plan bootstrap.
@@ -494,7 +517,27 @@ catalogue match reality — otherwise the next apply silently undoes it.
 | --- | --- | --- |
 | An app is compromised or misbehaving | **Suspend** it: Settings → GitHub Apps → app → Configure → Suspend. Takes effect at once, reversible | Quarantine it (removal stage 1) |
 | An app must lose one repository right now | App → Configure → remove the repository | Remove it from the catalogue. **Until merged, any apply puts it back** |
-| CI itself is broken and a fix must merge | Merge the fix with the admin bypass | Note the bypass and the reason in the pull request |
+| CI itself is broken and a fix must merge | Nobody can bypass the rules on `main`. Open a temporary bypass — see below | The fix itself, then close the bypass |
+
+**Opening a temporary bypass on `main`** (org owner, with bootstrap
+credentials). The ruleset deliberately has no standing bypass actors, so
+break-glass is a code change, visible in the ruleset's history:
+
+1. In `bootstrap/github.tf`, add to `github_repository_ruleset.governance_main`:
+
+   ```hcl
+   bypass_actors {
+     actor_type  = "OrganizationAdmin" # no actor_id for this type
+     bypass_mode = "pull_request"      # merge a PR past the rules; no direct pushes
+   }
+   ```
+
+2. `cd bootstrap && terraform apply`, merge the fix, then remove the block and
+   apply again — the same day.
+3. Commit both edits through a normal pull request afterwards, so the history
+   records the window.
+
+Until the bypass is removed, the weekly controls check reports it.
 
 After any break-glass action, run `gh workflow run reconcile.yml
 -R Delta-SK/github-app-governance` and make sure the resulting issue reflects

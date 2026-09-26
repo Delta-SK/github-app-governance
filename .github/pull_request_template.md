@@ -25,6 +25,7 @@
 - [ ] The owning team is a real GitHub team and has agreed to own this app
 - [ ] `review_by` is no more than 12 months out
 - [ ] Every listed repository is actually needed — not "might be useful"
+- [ ] `permissions` match the app's Configure page exactly; any widening is explained under *Why*
 - [ ] For a release: the app has been in quarantine for the whole soak period (7–14 days) with nothing breaking
 
 ## Reviewer checklist

@@ -43,6 +43,7 @@ variable "app_catalogue" {
     justification   = string
     review_by       = string
     repositories    = list(string)
+    permissions     = map(string)
     decommissioning = optional(bool, false)
   }))
 
@@ -87,6 +88,21 @@ variable "app_catalogue" {
   validation {
     condition     = alltrue([for a in var.app_catalogue : length(trimspace(a.owner)) > 0])
     error_message = "Every app needs a named owning team. Ownership is the point of the catalogue."
+  }
+
+  # What the app may DO, as approved. Repository scoping bounds where an app
+  # acts; this bounds what it can do there. The permissions_match_catalogue
+  # check compares it with the live installation, because widening happens
+  # outside any pull request: an app update requests more, and an owner
+  # clicks "accept" in the UI.
+  validation {
+    condition = alltrue(flatten([
+      for a in var.app_catalogue : [
+        length(a.permissions) > 0,
+        [for level in values(a.permissions) : contains(["read", "write", "admin"], level)],
+      ]
+    ]))
+    error_message = "Every app needs its approved permissions, each one read, write or admin — copy them from `terraform output org_installations`."
   }
 
   validation {

@@ -41,6 +41,16 @@ locals {
     slug if local.installations[slug].suspended && !var.app_catalogue[slug].decommissioning
   ])
 
+  // Every difference between approved and live permissions, both ways: a
+  // widening is a security finding, a narrowing means the catalogue is stale.
+  permission_drift = sort(flatten([
+    for slug in setintersection(local.catalogued, local.installed_slugs) : [
+      for key in setunion(keys(var.app_catalogue[slug].permissions), keys(local.installations[slug].permissions)) :
+      "${slug}.${key}: approved ${lookup(var.app_catalogue[slug].permissions, key, "none")}, live ${lookup(local.installations[slug].permissions, key, "none")}"
+      if lookup(var.app_catalogue[slug].permissions, key, "none") != lookup(local.installations[slug].permissions, key, "none")
+    ] if !var.app_catalogue[slug].decommissioning
+  ]))
+
   ghost_owners = setsubtract(
     toset([for app in var.app_catalogue : app.owner]),
     toset(data.github_organization_teams.all.teams[*].slug)
@@ -114,5 +124,18 @@ check "no_suspended_installations" {
   assert {
     condition     = length(local.suspended) == 0
     error_message = "Catalogued app(s) currently suspended: ${join(", ", local.suspended)}. Suspension retains every grant — either decommission it properly (docs/OPERATIONS.md) or unsuspend and confirm the access is still wanted."
+  }
+}
+
+check "permissions_match_catalogue" {
+  // Repository scope is enforced by Terraform; permissions cannot be — they
+  // are part of the app, and GitHub changes them when an owner accepts an
+  // app update's request for more. This makes that acceptance visible.
+  // A warning, because the change already happened outside the pull request:
+  // the response is a pull request that either records the new permissions
+  // (approving them) or starts decommissioning the app.
+  assert {
+    condition     = length(local.permission_drift) == 0
+    error_message = "Installed permissions differ from the catalogue: ${join("; ", local.permission_drift)}. If the change was accepted deliberately, record it in the app's `permissions` through a pull request; otherwise investigate who accepted it. See docs/OPERATIONS.md."
   }
 }

@@ -54,6 +54,7 @@ Every entry carries:
 | `justification` | Why the org accepts the risk. The field a security reviewer reads |
 | `review_by` | The date this stops being assumed-good |
 | `repositories` | The access itself — enforced, not documented |
+| `permissions` | What the app may do there, as approved — compared with the live installation on every plan |
 
 `owner` being a team rather than an individual is the single highest-value
 constraint here. Individual ownership decays silently the moment someone
@@ -288,9 +289,16 @@ Org **Settings → GitHub Apps → the app → Configure**. Suspend first if you
 want one more reversible step — suspension blocks the installation entirely,
 including anything repository scoping did not cover — then uninstall.
 
-Terraform cannot do this, and neither can a script run by an org owner: the
-REST endpoints for suspending and deleting an installation require the app's
-own credentials. It is a human action by design.
+On the plan used here, Terraform cannot do this, and neither can a script run
+by an org owner: the app-level REST endpoints for suspending and deleting an
+installation require the app's own credentials. It is a human action.
+
+On **GitHub Enterprise Cloud** it need not be. An enterprise-owned GitHub App
+with *Enterprise organization installations* (write) can call
+`DELETE /enterprises/{e}/apps/organizations/{org}/installations/{id}` — so
+stage 4 can become the last step of an automated, still staged and still
+reviewed, decommissioning (README, *What this costs, and what it would cost
+at scale*).
 
 Between stage 3 and stage 4 the `tombstones_are_uninstalled` check warns that
 the app is still installed. That warning is the reminder to finish; it clears
@@ -314,26 +322,34 @@ is about to unknowingly reverse it.
 Detection and cleanup are necessary but not sufficient — they treat symptoms.
 The recurrence is prevented at the org settings level:
 
-1. **Restrict who can install apps.** Org settings → third-party application
-   access. Only owners install; everyone else requests. This alone converts
-   the problem from *unbounded* to *reviewed*.
+1. **Restrict who can install and request apps.** Only organisation owners
+   can install apps on an organisation; everyone else can only *request*.
+   Since January 2026, **Member privileges → App access requests** also
+   controls who may request — members and outside collaborators, members
+   only, or nobody. Set it to *members only*, so outside collaborators cannot
+   generate requests, or to *disabled* once the request form in this
+   repository (`.github/ISSUE_TEMPLATE/app-request.yml`) is the one channel.
+   This converts the problem from *unbounded* to *reviewed*.
 2. **Make the catalogue PR the request channel.** An engineer who wants an app
    opens a PR adding a catalogue entry. Review is the approval. Merge is the
    installation authorisation. There is no other path.
 3. **Default to narrow scope.** New entries name specific repositories. Org-wide
    access is available, but as a deliberate, justified, reviewed exception.
-4. **Review permissions, not just repositories.** This implementation governs
-   *which repositories* an app reaches. *What it can do* there is fixed by the
-   app's manifest and is not Terraform-manageable — so permission changes on an
-   app version bump need catching at review time, and should be part of the
-   `review_by` cycle rather than assumed stable. The installations data source
-   already returns each installation's `permissions`; recording them in the
-   catalogue and flagging any widening is the natural next check.
+4. **Review permissions, not just repositories.** Every catalogue entry
+   records the `permissions` it was approved with, and the
+   `permissions_match_catalogue` check compares them with the live
+   installation on every plan and every week. That matters because
+   permissions change *outside* this repository: an app update asks for more,
+   and an owner accepts in the UI. The next plan names the app and each
+   permission that moved; the response is a pull request that either records
+   the new permissions — approving them, with a reason — or starts
+   decommissioning.
 
-Point 4 is the honest gap in this design. Repository scoping bounds blast
-radius; it does not bound capability. An app with `contents: write` on one
-repository can still do everything `contents: write` allows on that repository.
-Scope and permission are separate axes and only one of them is code here.
+What remains of the gap: permissions are **detected**, not **enforced**.
+Terraform cannot refuse an owner's acceptance of wider permissions; it can
+only make it visible within a week and force an explicit decision. Scope and
+permission are separate axes: scope is enforced as code, permission is
+audited as code.
 
 ---
 
@@ -347,11 +363,13 @@ Scope and permission are separate axes and only one of them is code here.
 | Blast radius of a bad apply | Per-team state means a mistake affects one team |
 | Signal fatigue | Orphan and expiry findings need SLAs and routing, not a wall of warnings. One issue per team rather than one per org |
 | Plan approvals | Already solved for the common case: catalogue pull requests plan automatically, because the plan runs main's code on the pull request's data. Only code changes wait for a platform-engineering approval — with self-review prevented once the team has more than one member |
-| Credential | One human-owned `admin:org` PAT becomes a machine user's, in a secrets manager with rotation. The user-to-server API leaves no weaker option (README, *Authentication*) |
+| Credential | On Enterprise Cloud: an enterprise-owned GitHub App with only *Enterprise organization installation repositories* — no human token at all. Elsewhere: a machine user's PAT in a secrets manager with rotation (README, *Authentication*) |
+| Many organisations | The enterprise installations API lists every installation in every organisation of the enterprise: one reconciler, one inventory, orphans visible org-wide rather than per org |
 | Audit evidence | Git history *is* the audit trail: who approved what access, when, and why — plus the plan of record in each apply log |
 
 That last row is the real prize. "Show me every change to third-party access
 in the last year, with the approver" is a `git log` on one directory — not a
-ticket to the platform team and a week of screenshots. It holds only while
-nobody bypasses branch protection; at scale `enforce_admins` goes on and the
-break-glass path becomes a documented, audited exception.
+ticket to the platform team and a week of screenshots. It holds because
+nothing bypasses the rules on `main`: the ruleset has no bypass actors, so
+every change carries a second person's approval, and break-glass is itself a
+visible change to the ruleset.

@@ -13,6 +13,9 @@
 # apply job trusts them. Editing them is editing a control.
 /scripts/                 @Delta-SK/platform-engineering
 
+# How vulnerabilities in these controls are reported and handled.
+/SECURITY.md              @Delta-SK/platform-engineering
+
 # The Terraform version every job and every engineer runs. Changing it
 # changes the binary that holds the state.
 /.terraform-version       @Delta-SK/platform-engineering

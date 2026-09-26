@@ -6,6 +6,7 @@ output "app_access_matrix" {
       review_by       = app.review_by
       decommissioning = app.decommissioning
       repositories    = sort(app.repositories)
+      permissions     = app.permissions
     }
   }
 }
@@ -22,6 +23,7 @@ output "org_installations" {
       installation_id      = tostring(i.id)
       repository_selection = i.repository_selection
       suspended            = i.suspended
+      permissions          = i.permissions
       created_at           = i.created_at
       declared             = contains(local.catalogued, slug)
       tombstoned           = contains(local.tombstoned, slug)

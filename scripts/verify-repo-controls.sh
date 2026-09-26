@@ -5,7 +5,8 @@
 #
 # These controls are created by bootstrap/, which is applied by hand and has
 # its own state on purpose: CI must not be able to rewrite the controls that
-# constrain it. The cost of that separation is that nothing in CI notices if
+# constrain it. (Private vulnerability reporting is the one set through the
+# REST API, from bootstrap, because the provider has no resource for it.) The cost of that separation is that nothing in CI notices if
 # somebody weakens them in the GitHub UI. This script is that notice. It is
 # read-only and runs weekly from reconcile.yml; exit 1 means a control is
 # missing, with one "- " line per problem on stdout.
@@ -23,17 +24,41 @@ get() {
   echo "$out"
 }
 
-prot=$(get "repos/$repo/branches/main/protection")
+# Rules in force on main, whichever ruleset they come from. Readable without
+# an admin token, which is one reason this repository uses rulesets.
+rules=$(gh api "repos/$repo/rules/branches/main" 2>/dev/null) || rules='[]'
+rule() { jq -e --arg t "$1" "[.[] | select(.type == \$t) | $2] | any" <<<"$rules" >/dev/null; }
+
+rule pull_request '.parameters.required_approving_review_count >= 1' ||
+  problem "main does not require an approving review"
+rule pull_request '.parameters.require_code_owner_review == true' ||
+  problem "main does not require CODEOWNER review"
+rule pull_request '.parameters.require_last_push_approval == true' ||
+  problem "main does not require the last push to be approved by someone else"
+rule pull_request '.parameters.dismiss_stale_reviews_on_push == true' ||
+  problem "main keeps approvals after new pushes"
 for ctx in validate terraform-plan; do
-  jq -e --arg c "$ctx" '.required_status_checks.contexts // [] | index($c)' <<<"$prot" >/dev/null ||
+  rule required_status_checks "any(.parameters.required_status_checks[]; .context == \"$ctx\")" ||
     problem "main does not require the '$ctx' status check"
 done
-jq -e '.required_pull_request_reviews.require_code_owner_reviews == true' <<<"$prot" >/dev/null ||
-  problem "main does not require CODEOWNER review"
-jq -e '(.required_pull_request_reviews.required_approving_review_count // 0) >= 1' <<<"$prot" >/dev/null ||
-  problem "main does not require an approving review"
-jq -e '.allow_force_pushes.enabled == false' <<<"$prot" >/dev/null ||
-  problem "force pushes to main are allowed (or main is unprotected)"
+rule non_fast_forward 'true' || problem "force pushes to main are allowed"
+rule deletion 'true' || problem "main can be deleted"
+
+# No standing bypass: break-glass is a deliberate, audited ruleset change.
+for id in $(jq -r '[.[].ruleset_id] | unique | .[]' <<<"$rules"); do
+  bypass=$(gh api "repos/$repo/rulesets/$id" --jq '[.bypass_actors[]? | .actor_type] | join(",")' 2>/dev/null) || bypass=unknown
+  [ -z "$bypass" ] ||
+    problem "ruleset $id on main has bypass actors ($bypass) — if this is break-glass, remove them when done"
+done
+
+# Secret protection and a private reporting channel for SECURITY.md.
+repo_json=$(get "repos/$repo")
+for feature in secret_scanning secret_scanning_push_protection; do
+  jq -e --arg f "$feature" '.security_and_analysis[$f].status == "enabled"' <<<"$repo_json" >/dev/null ||
+    problem "$feature is not enabled"
+done
+jq -e '.enabled == true' <<<"$(get "repos/$repo/private-vulnerability-reporting")" >/dev/null ||
+  problem "private vulnerability reporting is off — SECURITY.md points reporters to it"
 
 # The trust model (README, "The trust boundary"): the credential is reachable
 # only from workflow definitions on a protected branch (plan, production), or
@@ -52,6 +77,8 @@ done
 plan_code=$(get "repos/$repo/environments/plan-code")
 jq -e '[.protection_rules[]?.type] | index("required_reviewers")' <<<"$plan_code" >/dev/null ||
   problem "the 'plan-code' environment has no required reviewers — pull request code could read TF_GITHUB_TOKEN unattended"
+jq -e '[.protection_rules[]? | select(.type == "required_reviewers") | .prevent_self_review] | any' <<<"$plan_code" >/dev/null ||
+  problem "the 'plan-code' environment lets the author of a change release the credential to it"
 jq -e '.can_admins_bypass == false' <<<"$plan_code" >/dev/null ||
   problem "administrators can bypass the 'plan-code' environment's required reviewers"
 

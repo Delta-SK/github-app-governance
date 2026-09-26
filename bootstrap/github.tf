@@ -239,18 +239,25 @@ resource "github_repository_ruleset" "governance_main" {
 // Environments — the trust boundary for credentials
 // ---------------------------------------------------------------------------
 //
-// TF_GITHUB_TOKEN (an organisation-admin PAT) lives in these environments,
-// never as a repository secret, so no job can read it implicitly. The rule
-// they encode: the credential reaches either code already on main, or pull
-// request code that a human has looked at — never unreviewed code.
+// Credentials live in these environments, never as repository secrets, so no
+// job can read one implicitly. The rule they encode: the organisation-admin
+// token (TF_GITHUB_TOKEN) only ever meets code that is already on main.
+// Pull request code gets a read-only token and nothing else — so no run
+// needs a human to release a credential, and the only approval left in the
+// whole flow is the pull request review itself.
 //
-//   plan       main only, no reviewer. terraform-plan.yml is a
+//   plan       main only. TF_GITHUB_TOKEN. terraform-plan.yml is a
 //              pull_request_target workflow: GitHub runs main's definition
 //              of it, which plans main's code against the PR's *.tfvars
-//              data. Data cannot execute, so no approval is needed.
-//   plan-code  reviewers required. terraform-plan-code.yml runs a PR's own
-//              Terraform code, which could do anything with the credential.
-//   production main only, no reviewer. The pull request was the gate.
+//              data. Data cannot execute.
+//   plan-code  any ref. TF_GITHUB_READ_TOKEN only — a fine-grained token
+//              with organisation Administration and Members read.
+//              terraform-plan-code.yml runs a PR's own code with it, so a
+//              malicious PR can at most read what that token reads.
+//   production main only. TF_GITHUB_TOKEN. The pull request was the gate.
+//
+// scripts/verify-repo-controls.sh fails if TF_GITHUB_TOKEN ever appears in
+// plan-code: that single secret is what keeps the rule true.
 //
 // can_admins_bypass = false everywhere: an administrator gains nothing
 // legitimate from bypassing, and it keeps the rule above exceptionless.
@@ -266,19 +273,13 @@ resource "github_repository_environment" "plan" {
   }
 }
 
+// No reviewers and no branch policy, deliberately: this environment holds
+// only a read-only token, so a code plan runs as soon as the pull request is
+// pushed and the reviewer sees it before approving — not after.
 resource "github_repository_environment" "plan_code" {
   repository        = github_repository.governance.name
   environment       = "plan-code"
   can_admins_bypass = false
-
-  // Whoever pushed the code cannot release the credential to it.
-  prevent_self_review = true
-
-  // The team, not named individuals: whoever is on the platform team can
-  // release a run, and leaving the team revokes it.
-  reviewers {
-    teams = [tonumber(github_team.platform_engineering.id)]
-  }
 }
 
 resource "github_repository_environment" "production" {

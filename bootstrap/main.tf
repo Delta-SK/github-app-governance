@@ -149,7 +149,7 @@ data "aws_iam_policy_document" "assume_plan" {
     # enforced by the environment rather than duplicated in IAM.
     #
     # plan       -> main's code planning a PR's catalogue data (automatic)
-    # plan-code  -> a PR's own code, after a human approves the run
+    # plan-code  -> a PR's own code, automatically (read-only GitHub token)
     # production -> main only; the reconciler runs here and takes this
     #               read-only role, which costs nothing.
     #

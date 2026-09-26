@@ -37,7 +37,7 @@ terraform/catalogue.auto.tfvars      <- source of truth: apps, owners, access
         v
 terraform-validate.yml   PR's own code: fmt, validate, lint         (no credentials)
 terraform-plan.yml       main's code x PR's catalogue: plan, guard  (automatic)
-terraform-plan-code.yml  PR's own code: plan, guard  (only if code changed; approval)
+terraform-plan-code.yml  PR's own code, read-only token: plan, guard (if code changed)
         |
         |  review (CODEOWNERS) + merge to main
         v
@@ -94,6 +94,8 @@ CODEOWNERS routing review per team. The schema does not change.
   automatically; `terraform/versions.tf` refuses anything outside 1.16.x
 - An AWS account (state backend) with credentials available locally
 - A GitHub organisation where you are an **owner**
+- A fine-grained, read-only token for plans of pull request code — see
+  *Setup* step 1
 - A **classic** personal access token with `repo` and `admin:org` scopes.
   Add `workflow` as well if you intend to push changes to
   `.github/workflows/` — GitHub rejects such pushes otherwise. The token
@@ -156,10 +158,10 @@ GitHub's generic signal that an endpoint has **no fine-grained support at
 all** — not that a permission is missing. No combination of toggles enables it.
 
 Note the split: the **audit** half of this project is reachable with a
-fine-grained token, the **enforcement** half is not. A read-only reconciler
-could therefore run on a much weaker credential than the applier, if the
-reconciler were rewritten to query the installations API directly instead of
-running `terraform plan`.
+fine-grained token, the **enforcement** half is not. The CI uses exactly that
+split: plans of pull request *code* run with a read-only fine-grained token
+and `-refresh=false`, which skips the one API that needs the classic PAT (see
+*The trust boundary*).
 
 With GitHub App auth, fine-grained PATs and `GITHUB_TOKEN` all excluded, a
 classic PAT is the only credential that drives **this Terraform resource**.
@@ -213,9 +215,9 @@ The credential is an organisation-admin PAT, and GitHub offers nothing weaker
 that can read installation access (see *Fine-grained PATs do not work*). So
 the whole CI design comes down to one rule:
 
-> **The credential only ever meets code that is already on `main`, or code a
-> human has approved. Pull request *data* may reach it; pull request *code*
-> may not — unless someone looked first.**
+> **The admin credential only ever meets code that is already on `main`.
+> Pull request *data* may reach it; pull request *code* gets a read-only
+> token and nothing more.**
 
 The obvious setup breaks that rule. For `pull_request` events GitHub runs the
 workflow definition from the *pull request head*: anyone who can push a branch
@@ -231,7 +233,7 @@ The current design separates **code** from **data** instead:
 | --- | --- | --- | --- | --- | --- |
 | `terraform-validate` | `pull_request` | the PR's | the PR's | **none** | no |
 | `terraform-plan` | `pull_request_target` | **main's** | the PR's `*.auto.tfvars` | yes | **no** |
-| `terraform-plan-code` | `pull_request`, code paths only | the PR's | the PR's | yes | **yes** (`plan-code`) |
+| `terraform-plan-code` | `pull_request`, code paths only | the PR's | the PR's | **read-only** token, `-refresh=false` | **no** |
 | `terraform-apply` | push to `main` | main's | main's | yes (write) | no — the PR was the gate |
 | `reconcile` | weekly | main's | main's | yes | no |
 | `scorecard` | weekly, push to `main` | main's (a third-party action) | main's | **none** — default token only | no |
@@ -254,12 +256,27 @@ Why `terraform-plan` is safe without approval:
   reached by any other workflow definition.
 
 What it cannot do: show the effect of a pull request's **code** changes,
-because it deliberately runs `main`'s code. Such pull requests are rare,
-made by the platform team, and get two things: the automatic plan says so in
-its comment, and `terraform-plan-code` plans their own code once a
-platform-engineering reviewer approves the `plan-code` environment. That is
-the one approval left, and it sits exactly where running unreviewed code
-with an admin credential would otherwise happen.
+because it deliberately runs `main`'s code. That is `terraform-plan-code`'s
+job, and it runs automatically too — so for every pull request the reviewer
+sees the diff *and* its plan before approving:
+
+- It runs the pull request's own code, so it gets only what the pull request
+  may safely hold: `TF_GITHUB_READ_TOKEN`, a fine-grained token with
+  organisation *Administration* and *Members* **read**, and the read-only
+  state role. The `plan-code` environment never contains the admin token; the
+  weekly controls check fails if it ever does.
+- That token cannot read an installation's repositories (the API accepts
+  only a classic PAT), so the plan runs with `-refresh=false`: it shows what
+  the code change does relative to the state of the last apply. Live drift is
+  shown by the catalogue plan, which refreshes, and the apply re-plans with
+  refresh before changing anything.
+- A malicious pull request can at most read what that token reads — the
+  organisation's app inventory and team list — and the state, which holds no
+  secrets.
+
+The result is a single human approval in the whole flow: the pull request
+review, made with the code, the catalogue plan and the code plan in front of
+the reviewer.
 
 Supporting controls:
 
@@ -267,7 +284,7 @@ Supporting controls:
 | --- | --- |
 | `TF_GITHUB_TOKEN` exists only as an **environment** secret | No job can read it implicitly; there are no repository-level secrets (`gh secret list` returns nothing) |
 | `plan` and `production` admit **`main` only**, admin bypass off | Protecting another branch later cannot silently widen who reaches the credential |
-| `plan-code` requires the **platform-engineering team**, self-review prevented, admin bypass off | Whoever is on the team can release a run — except the person who pushed the code; leaving the team revokes it |
+| `plan-code` holds **only a read-only token** | Pull request code plans automatically without ever meeting the admin token; the weekly controls check fails if `TF_GITHUB_TOKEN` appears there |
 | `main` is a **ruleset with no bypass actors** | Owners included: no change lands without `validate`, `terraform-plan` and a code owner's approval of the latest push. Break-glass is a visible ruleset change |
 | **CodeQL** scans the workflows on every pull request | Catches the mistakes that would break this model — an untrusted checkout in `terraform-plan.yml`, expression injection into `run:` — before review |
 | **Secret scanning and push protection** on every repository | A token pasted into a commit is rejected at `git push`, not discovered later in public history |
@@ -351,7 +368,8 @@ To see the claim your own repository issues, dispatch a workflow that prints
 
 | Name | Kind | Scope | Value |
 | --- | --- | --- | --- |
-| `TF_GITHUB_TOKEN` | secret | **environment** `plan`, `plan-code` and `production` | classic PAT (`repo`, `admin:org`) |
+| `TF_GITHUB_TOKEN` | secret | **environment** `plan` and `production` — code on `main` only | classic PAT (`repo`, `admin:org`) |
+| `TF_GITHUB_READ_TOKEN` | secret | **environment** `plan-code` | fine-grained PAT, owner = the org: all repositories (metadata), organisation *Administration: read*, *Members: read* |
 | `AWS_PLAN_ROLE_ARN` | variable | repository | read-only state role |
 | `AWS_APPLY_ROLE_ARN` | variable | repository | read-write state role |
 
@@ -395,15 +413,22 @@ chicken-and-egg step in the setup, and it only happens once.
 Copy the outputs into `terraform/versions.tf` (backend block) and into the
 repository variables `AWS_PLAN_ROLE_ARN` and `AWS_APPLY_ROLE_ARN`.
 
-`TF_GITHUB_TOKEN` must be set as an **environment** secret on `plan`,
-`plan-code` and `production` — never as a repository secret, which every job
-could read, including one a pull request rewrote:
+Both GitHub tokens are **environment** secrets — never repository secrets,
+which every job could read, including one a pull request rewrote. The admin
+token goes only where `main`'s code runs; the read-only one is the only
+credential pull request code ever sees:
 
 ```bash
-for env in plan plan-code production; do
-  gh secret set TF_GITHUB_TOKEN --env "$env" -R <org>/<repo>   # prompts for the value
+for env in plan production; do
+  gh secret set TF_GITHUB_TOKEN --env "$env" -R <org>/<repo>      # classic PAT; prompts for the value
 done
+gh secret set TF_GITHUB_READ_TOKEN --env plan-code -R <org>/<repo>  # fine-grained, read-only
 ```
+
+Create the read-only token under **Settings → Developer settings →
+Fine-grained tokens**: resource owner = the organisation, all repositories,
+organisation permissions *Administration: read-only* and *Members:
+read-only*, nothing else, with an expiry date.
 
 ### 2. Install the apps
 
@@ -606,7 +631,7 @@ them from the file.
 | `bootstrap/github.tf` | `description` of `github_repository.governance` | The governance repository must already exist (it is where this code lives); bootstrap adopts it with an `import` block. Enabling private vulnerability reporting needs `curl` and the token in `GITHUB_TOKEN` (or `gh auth login`) |
 | `bootstrap/main.tf` and `terraform/versions.tf` | `backend "s3"` `bucket`, `region` | Same values as above, in both files |
 | `.github/workflows/*.yml` | `AWS_REGION` | Must match the backend region |
-| Repository settings | variables `AWS_PLAN_ROLE_ARN`, `AWS_APPLY_ROLE_ARN`; secret `TF_GITHUB_TOKEN` in **all three** environments | Role ARNs are bootstrap outputs. Never a repository-level secret |
+| Repository settings | variables `AWS_PLAN_ROLE_ARN`, `AWS_APPLY_ROLE_ARN`; secrets `TF_GITHUB_TOKEN` in `plan` and `production`, `TF_GITHUB_READ_TOKEN` in `plan-code` | Role ARNs are bootstrap outputs. Never repository-level secrets — see *Setup* step 1 |
 | `terraform/settings.tf` | `github_org` | A local, not a variable — see *The trust boundary* |
 | `terraform/catalogue.auto.tfvars` | `repositories`, every `installation_id` and `owner` | IDs are per installation and never carry over — see *Setup* step 3 |
 | `terraform/decommissioned.auto.tfvars` | tombstones | Start from `{}` |
@@ -704,8 +729,8 @@ does not repair it.
 On a paid plan, set `visibility = "private"` in `repositories.tf`.
 
 **The second reviewer is a demonstration identity.** `main` requires an
-approving CODEOWNER review from someone other than the last pusher, and
-`plan-code` runs cannot be released by their author. In this test org the
+approving CODEOWNER review from someone other than the last pusher. In this
+test org the
 second member of `@Delta-SK/platform-engineering` is a dedicated reviewer
 account, `Approver777`: it exercises the mechanism end to end, but it is not
 independent judgement. In a real organisation it is a second engineer, and
@@ -713,12 +738,17 @@ nothing in the configuration changes. Merges before this account existed
 (pull requests #1–#7) used the owner bypass and are visible as such in the
 history.
 
-**Code changes are planned only after an approval.** Catalogue pull requests
-plan automatically, but a pull request that changes Terraform code, scripts,
-workflows or the Terraform version gets its *own* plan only once a platform
-engineer approves the `plan-code` run. That is the price of never running
-unreviewed code next to an admin credential. Such pull requests are rare and
-come from the platform team, who can also plan them locally.
+**Code plans are not refreshed, and their token is readable by any branch.**
+`terraform-plan-code` runs with `-refresh=false`, because the read-only
+token cannot read installation repositories; it shows the code change against
+the state of the last apply, not against live GitHub. And because it runs pull
+request code without an approval, anyone who can push a branch can read
+`TF_GITHUB_READ_TOKEN` — the organisation's app inventory and team list, read
+only. Both are the price of showing every reviewer a plan without handing pull
+request code the admin token. A read-only GitHub App could replace the
+fine-grained token and remove the human owner, but not the exposure: pull
+request code controls the whole job, so it could read the App's private key
+just as it can read the token. Read-only is the real boundary either way.
 
 **`terraform-plan` is a `pull_request_target` workflow.** It is safe because
 it never runs pull request code — and it stays safe only while that remains

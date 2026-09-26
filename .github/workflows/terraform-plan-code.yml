@@ -4,12 +4,19 @@ name: terraform-plan-code
 # Terraform code, scripts, workflows or the Terraform version. The automatic
 # terraform-plan.yml cannot show those: it deliberately runs main's code.
 #
-# This is the one place a human must approve a run. For pull_request events
-# GitHub runs the workflow definition from the pull request itself, so this
-# job — and anything it calls — is whatever the pull request says it is,
-# holding the organisation-admin credential. The `plan-code` environment
-# requires a platform-engineering reviewer to release it: read the diff,
-# especially under .github/ and scripts/, before approving.
+# Runs automatically, so the reviewer sees the plan before approving. That is
+# safe only because of what this job does NOT hold. For pull_request events
+# GitHub runs the workflow definition from the pull request itself: this job
+# is whatever the pull request says it is. So it gets a read-only GitHub
+# token (TF_GITHUB_READ_TOKEN, fine-grained: organisation Administration and
+# Members read) and the read-only state role — never the organisation-admin
+# token, which the `plan-code` environment does not contain.
+#
+# The read-only token cannot read an installation's repositories (that API
+# accepts only a classic PAT), so the plan runs with -refresh=false: it shows
+# what this pull request's CODE changes, relative to the state of the last
+# apply. Live drift is in the automatic catalogue plan, which refreshes, and
+# the apply re-plans with refresh before touching anything.
 #
 # Advisory, not a required check: the pull request can rewrite this file, so
 # its result is evidence for the reviewer, not a gate. The gates are CODEOWNER
@@ -31,7 +38,7 @@ permissions: {}
 
 concurrency:
   group: terraform-plan-code-${{ github.event.pull_request.number }}
-  cancel-in-progress: true # also withdraws a run still waiting for approval
+  cancel-in-progress: true
 
 env:
   AWS_REGION: eu-central-1
@@ -89,7 +96,12 @@ jobs:
       - name: terraform plan
         working-directory: terraform
         env:
-          GITHUB_TOKEN: ${{ secrets.TF_GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.TF_GITHUB_READ_TOKEN }}
+          TF_CLI_ARGS_plan: -refresh=false
+          REPORT_NOTE: >-
+            Planned with this pull request's own code, a **read-only** token and
+            `-refresh=false`: it shows what the code change does relative to the
+            state of the last apply. Live drift appears in the catalogue plan above.
         run: bash ../scripts/plan-report.sh "### Terraform plan — this pull request's code" report.md
 
       - name: Comment the plan on the pull request

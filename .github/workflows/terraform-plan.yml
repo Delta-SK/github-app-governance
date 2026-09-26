@@ -13,7 +13,8 @@ name: terraform-plan
 #
 # A pull request that changes code is planned here with MAIN's code, which is
 # not what it will do once merged; the comment says so, and
-# terraform-plan-code.yml plans its own code after a reviewer approves.
+# terraform-plan-code.yml plans its own code, automatically, with a read-only
+# token.
 #
 # Never add a step that checks out, installs, builds or runs anything from the
 # pull request. That turns this workflow into a textbook "pwn request".
@@ -106,7 +107,7 @@ jobs:
           if [ -s ../code_changes.txt ]; then
             # shellcheck disable=SC2016 # the backticks are Markdown, not shell
             files=$(sed 's/.*/`&`/' ../code_changes.txt | paste -sd, - | sed 's/,/, /g')
-            export REPORT_NOTE="⚠️ **This pull request also changes code:** $files. The plan above runs **main's** code against this pull request's catalogue, so it does not show what the code change will do. \`terraform-plan-code\` plans the pull request's own code once a platform engineer approves the run."
+            export REPORT_NOTE="⚠️ **This pull request also changes code:** $files. The plan above runs **main's** code against this pull request's catalogue, so it does not show what the code change will do. \`terraform-plan-code\` posts a second comment with the pull request's own code planned."
           fi
           bash ../scripts/plan-report.sh "### Terraform plan — catalogue" report.md
 

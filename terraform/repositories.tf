@@ -12,6 +12,20 @@ resource "github_repository" "this" {
   allow_merge_commit     = false
   allow_squash_merge     = true
   allow_rebase_merge     = false
+
+  // A leaked credential in any repository an app can reach is a credential
+  // that app's vendor can read. Push protection stops the commit; scanning
+  // catches what predates it. Free on public repositories. advanced_security
+  // is deliberately absent: GitHub rejects setting it on public repositories,
+  // where it is always on.
+  security_and_analysis {
+    secret_scanning {
+      status = "enabled"
+    }
+    secret_scanning_push_protection {
+      status = "enabled"
+    }
+  }
 }
 
 resource "github_repository_vulnerability_alerts" "this" {
@@ -21,21 +35,37 @@ resource "github_repository_vulnerability_alerts" "this" {
   enabled    = true
 }
 
-resource "github_branch_protection" "main" {
+// Repository rulesets rather than classic branch protection: rulesets are
+// GitHub's successor, apply to administrators unless they are explicitly
+// listed as bypass actors (none here), and are readable without an admin
+// token — so tools such as OpenSSF Scorecard can verify them.
+resource "github_repository_ruleset" "main" {
   for_each = github_repository.this
 
-  repository_id = each.value.node_id
-  pattern       = "main"
+  name        = "main"
+  repository  = each.value.name
+  target      = "branch"
+  enforcement = "active"
 
-  required_pull_request_reviews {
-    required_approving_review_count = 1
-    dismiss_stale_reviews           = true
+  conditions {
+    ref_name {
+      include = ["~DEFAULT_BRANCH"]
+      exclude = []
+    }
   }
 
-  require_conversation_resolution = true
-  allows_force_pushes             = false
-  allows_deletions                = false
+  rules {
+    deletion         = true
+    non_fast_forward = true
 
-  # No required_status_checks: no CI runs inside these repositories, and
-  # requiring a check that never reports would make main unmergeable.
+    pull_request {
+      required_approving_review_count   = 1
+      dismiss_stale_reviews_on_push     = true
+      required_review_thread_resolution = true
+      allowed_merge_methods             = ["squash"]
+    }
+
+    # No required_status_checks: no CI runs inside these repositories, and
+    # requiring a check that never reports would make main unmergeable.
+  }
 }

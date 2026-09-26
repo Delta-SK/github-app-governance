@@ -43,9 +43,27 @@ variable "state_bucket" {
 }
 
 variable "platform_team_members" {
-  description = "GitHub usernames belonging to the platform-engineering team, which owns CODEOWNERS review."
-  type        = list(string)
-  default     = ["SergeyKirakosyan"]
+  description = <<-EOT
+    The platform-engineering team, username => team role: the code owners of
+    this repository and the reviewers of code plans. At least two, so that no
+    change — and no release of the credential to pull request code — rests on
+    its author alone.
+  EOT
+  type        = map(string)
+  default = {
+    SergeyKirakosyan = "maintainer" // org owner: GitHub reports owners as maintainers regardless
+    Approver777      = "member"
+  }
+
+  validation {
+    condition     = length(var.platform_team_members) >= 2
+    error_message = "The platform team needs at least two members: approvals and prevent_self_review are meaningless with one."
+  }
+
+  validation {
+    condition     = alltrue([for role in values(var.platform_team_members) : contains(["member", "maintainer"], role)])
+    error_message = "Team roles are member or maintainer. Prefer member: maintainers can change who is on the team, and so who can approve."
+  }
 }
 
 variable "app_owner_teams" {

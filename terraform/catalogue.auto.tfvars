@@ -44,6 +44,21 @@ app_catalogue = {
     repositories = [
       "payments-api",
     ]
+    # Approved 2026-09-25 with the installation. Broad by nature: Renovate
+    # edits workflow files (workflows) and reads the org to assign reviewers.
+    permissions = {
+      administration       = "read"
+      checks               = "write"
+      contents             = "write"
+      issues               = "write"
+      members              = "read"
+      metadata             = "read"
+      packages             = "read"
+      pull_requests        = "write"
+      statuses             = "write"
+      vulnerability_alerts = "read"
+      workflows            = "write"
+    }
   }
 
   imgbot = {
@@ -55,5 +70,10 @@ app_catalogue = {
     repositories = [
       "web-frontend",
     ]
+    permissions = {
+      contents      = "write"
+      metadata      = "read"
+      pull_requests = "write"
+    }
   }
 }

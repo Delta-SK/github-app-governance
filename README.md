@@ -28,26 +28,33 @@ terraform/catalogue.auto.tfvars      <- source of truth: apps, owners, access
         |
         |  pull request
         v
-.github/workflows/terraform-plan.yml   fmt / validate / plan -> PR comment
+.github/workflows/terraform-plan.yml   fmt / validate / plan / guard -> PR comment
         |
-        |  merge to main
+        |  review (CODEOWNERS) + merge to main
         v
-.github/workflows/terraform-apply.yml  terraform apply
+.github/workflows/terraform-apply.yml  plan of record -> guard -> apply that plan
         |
         v
 GitHub org: app installation repository access
 State: s3://delta-sk-tfstate-751569314116 (DynamoDB lock)
+
+.github/workflows/reconcile.yml        weekly: plan + checks + repo controls
+                                       -> opens / updates / closes one issue
 ```
 
 | Path | Purpose |
 | --- | --- |
 | `terraform/catalogue.auto.tfvars` | The catalogue. Apps, owners, review dates, repo access |
-| `terraform/app_access.tf` | Enforces repo access per app (`github_app_installation_repositories`) |
-| `terraform/repositories.tf` | Repositories and branch protection as code |
-| `terraform/checks.tf` | Orphan detection, scope validation, review-date expiry |
-| `terraform/data.tf` | Live installation inventory from the org |
-| `bootstrap/` | S3 state bucket, DynamoDB lock table, AWS OIDC role. Applied once |
-| `docs/GOVERNANCE.md` | Ownership, review, expiry, orphan detection, decommissioning |
+| `terraform/decommissioned.auto.tfvars` | Tombstones: apps removed, when, and why |
+| `terraform/app_access.tf` | Enforces repo access per app; preconditions for expiry, review horizon, installation ID |
+| `terraform/repositories.tf` | Repositories (including the quarantine repository) and their branch protection |
+| `terraform/checks.tf` | Warnings: orphans, tombstoned apps reinstalled, ghost owners, suspensions, reviews due |
+| `terraform/data.tf` | Live inventory: installations, teams, externally managed repositories |
+| `scripts/plan-guard.sh` | Refuses plans that would release an un-quarantined app or delete a repository |
+| `scripts/verify-repo-controls.sh` | Checks this repository's own branch protection, environments, secrets, CODEOWNERS |
+| `bootstrap/` | State backend, OIDC roles, this repo's branch protection, environments, teams. Applied by hand |
+| `docs/GOVERNANCE.md` | The operating model: ownership, review, expiry, orphans, decommissioning, scale |
+| `docs/OPERATIONS.md` | Step-by-step daily guide, for app owners and for the platform team |
 
 ### Why the catalogue is one file
 
@@ -74,6 +81,7 @@ CODEOWNERS routing review per team. The schema does not change.
   repositories here, so the token cannot either.
 - At least two GitHub Apps installed on the org, each set to
   **"Only select repositories"**
+- `jq` and the GitHub CLI (`gh`) for the inspection commands below
 
 ---
 
@@ -186,8 +194,14 @@ Two further consequences worth naming rather than discovering:
 - Third-party actions are **pinned to commit SHAs**, not tags. `@v4` is a
   moving reference; a compromised `setup-terraform` release would otherwise
   hand this job a trojaned Terraform binary alongside an org-owner token.
-- `.github/` is covered by CODEOWNERS, because a pull request that edits the
-  workflow is editing the control that would have shown you the edit.
+- `.github/` and `scripts/` are covered by CODEOWNERS, because a pull request
+  that edits the workflow is editing the control that would have shown you the
+  edit.
+- The `plan` status check and the plan comment are therefore **evidence, not a
+  boundary**: a pull request can rewrite the job that produces them. The
+  boundary is the environment approval plus the CODEOWNER review of any
+  `.github/` or `scripts/` change — and the apply job, which re-plans and
+  re-runs the guard from `main`, where pull request code cannot reach.
 
 There are **no repository-level secrets** in this repo — verify with
 `gh secret list`, which returns nothing. Everything is environment-scoped.
@@ -195,6 +209,15 @@ There are **no repository-level secrets** in this repo — verify with
 Apply is a different case: it runs code already merged to `main`, which has
 been through review. Its environment pins the credential to protected branches
 rather than gating on a reviewer, because the pull request was the gate.
+
+**Apply does not reuse the pull request's plan — deliberately.** That plan was
+produced by the job running untrusted code; applying an artifact it wrote
+would give pull request code a path to the apply credential. Instead the apply
+job computes a *plan of record* from `main`, logs it, runs the destroy guard on
+it, and applies exactly that saved plan. The PR plan is a preview. Because
+branch protection requires branches to be up to date before merging, the two
+differ only if the organisation drifted in between — and the plan of record,
+in the apply log, is what actually happened.
 
 ### AWS
 
@@ -266,8 +289,12 @@ terraform apply
 ```
 
 Creates the S3 bucket, the DynamoDB lock table, the GitHub OIDC provider, both
-CI roles, the `platform-engineering` team, this repository's branch protection,
-and the two Actions environments.
+CI roles, the `platform-engineering` team, the app-owning teams listed in
+`app_owner_teams`, this repository's branch protection, and the two Actions
+environments.
+
+Bootstrap needs AWS administrator credentials and the classic PAT, and it is
+**not** run by CI — see *Limitations* for why, and for what checks it instead.
 
 Against a **fresh AWS account**, comment out the `backend "s3"` block in
 `bootstrap/main.tf` for the first apply — it cannot use a bucket that does not
@@ -296,19 +323,35 @@ nothing for Terraform to govern — `checks.tf` fails the plan if it finds one.
 
 ### 3. Record installation IDs
 
+Read them straight from the API — before the first `terraform apply`, because
+until the catalogue holds the right IDs the apply would act on the wrong
+installations (the installation-ID precondition refuses it, but the point is
+not to get there):
+
 ```bash
-cd terraform
-export GITHUB_TOKEN=ghp_...
-terraform init
-terraform apply          # first apply creates repos and applies access
-terraform output org_installations
+gh api orgs/<your-org>/installations \
+  --jq '.installations[] | "\(.app_slug)\t\(.id)\t\(.repository_selection)"'
 ```
 
-`org_installations` lists every installation in the org with its ID and whether
-it is declared. Copy the IDs into `catalogue.auto.tfvars`.
+Copy each app's slug and ID into `catalogue.auto.tfvars`, together with an
+owning team (which must exist — see `app_owner_teams` in bootstrap), a purpose,
+a justification and a `review_by` date no more than a year away.
 
 This ordering is unavoidable: an app must already be installed before its
 access can be managed, and Terraform cannot install apps (see *Limitations*).
+
+### 4. First apply
+
+```bash
+cd terraform
+export GITHUB_TOKEN=ghp_...      # the classic PAT; never commit it
+terraform init
+terraform plan                    # read it — the resource is authoritative
+terraform apply
+terraform output org_installations   # every installation now shows declared = true
+```
+
+From here on, every change goes through a pull request.
 
 ---
 
@@ -327,8 +370,10 @@ Narrowing Renovate from two repositories to one:
    }
    ```
 
-2. Open a pull request. `terraform-plan` runs `fmt`, `validate` and `plan`, and
-   posts the plan as a PR comment:
+2. Open a pull request. The plan job waits for a platform engineer to approve
+   the `plan` environment (that releases the credential), then runs `fmt`,
+   `validate` (this configuration and `bootstrap/`), `plan` and the destroy
+   guard, and posts a summary table plus the plan as a PR comment:
 
    ```
    ~ resource "github_app_installation_repositories" "this["renovate"]" {
@@ -341,7 +386,9 @@ Narrowing Renovate from two repositories to one:
 3. CODEOWNERS requires platform-engineering review — the catalogue is an
    authorisation record, so a human approves the access change.
 
-4. Merge. `terraform-apply` applies it and prints the resulting access matrix.
+4. Merge. `terraform-apply` computes the plan of record from `main`, runs the
+   destroy guard on it, applies exactly that plan, and prints the resulting
+   access matrix.
 
 5. Verify against GitHub itself, not against state:
 
@@ -351,6 +398,10 @@ Narrowing Renovate from two repositories to one:
      | jq -r '.repositories[].full_name'
    ```
 
+Adding access is the same flow with a line added. Adding a new app, renewing a
+review, and removing an app are walked through step by step in
+[docs/OPERATIONS.md](docs/OPERATIONS.md).
+
 ---
 
 ## Inspecting the current state
@@ -358,110 +409,173 @@ Narrowing Renovate from two repositories to one:
 ```bash
 cd terraform
 
-terraform output app_access_matrix   # what Terraform intends
-terraform output org_installations   # what is actually installed, declared or not
-terraform plan -detailed-exitcode    # exit 0 = no drift, 2 = drift
+terraform output app_access_matrix     # what Terraform intends
+terraform output org_installations     # what is installed: ID, scope, suspended, declared, tombstoned
+terraform output decommissioned_apps   # tombstones
 ```
 
-Drift check, suitable for CI or a scheduled job:
+Full drift and governance status. **The exit code alone is not enough**:
+governance checks are warnings and leave it at 0, so read them from the plan:
 
 ```bash
-terraform plan -detailed-exitcode -lock=false >/dev/null 2>&1
-echo $?    # 0 clean, 2 drift, 1 error
+terraform plan -lock=false -detailed-exitcode -out=tfplan >/dev/null 2>&1
+echo "exit: $?"                                     # 0 no changes, 2 drift, 1 error
+terraform show -json tfplan \
+  | jq -r '.checks[] | select(.status == "fail") | .address.to_display'
+                                                    # empty = every check passes
 ```
+
+This repository's own controls (branch protection, environments, secrets,
+CODEOWNERS):
+
+```bash
+GH_TOKEN=$GITHUB_TOKEN ../scripts/verify-repo-controls.sh Delta-SK/github-app-governance
+```
+
+Or run all of the above in CI, with the result as an issue:
+`gh workflow run reconcile.yml`.
 
 ---
 
 ## Governance checks
 
-Controls run on every plan, and are split deliberately between **blocking**
-and **warning**.
+Controls are split deliberately between **blocking** and **warning**.
 
-| Control | Detects | Severity |
+**Blocking** — the plan fails, nothing is applied:
+
+| Control | Where | Refuses |
 | --- | --- | --- |
-| `precondition` in `app_access.tf` | An app past its `review_by` date | **Blocks** the plan |
-| `installations_are_declared` | An app installed in the org but absent from the catalogue — *the app nobody remembers installing* | Warns |
-| (same block, 2nd assert) | A catalogued app installed as `repository_selection = all`, which silently cannot be governed | Warns |
-| `reviews_are_due_soon` | An entry within `review_warning_days` (default 30) of expiry | Warns |
+| Expiry | precondition, `app_access.tf` | An app past its `review_by` date (unless `decommissioning = true`) |
+| Review horizon | precondition, `app_access.tf` | A `review_by` more than `max_review_days` (366) away — an opt-out from review |
+| Installation ID | precondition, `app_access.tf` | An `installation_id` that is not the installed ID for that app's slug — Terraform would otherwise re-point the resource at another app's installation |
+| Decommissioning shape | validation, `variables.tf` | `decommissioning = true` with anything other than exactly the quarantine repository; the quarantine repository used by any other app |
+| Required fields | validation, `variables.tf` | Empty `owner`, `purpose`, `justification`, empty repository list, malformed dates |
+| Tombstone clash | validation, `variables.tf` | An app both catalogued and tombstoned |
+| External repository | postcondition, `data.tf` | A repository name that does not exist in the org (with the name in the error) |
+| Destroy guard | `scripts/plan-guard.sh` | Releasing an app not yet quarantined; deleting a repository |
 
-The split is the point. **Stale data you own blocks your own apply** — an
-expiry date that never stops anything is decoration, so it is a resource
-precondition rather than a `check` block. **Somebody else's rogue installation
-does not block your unrelated change** — an orphan is a signal to investigate,
-and halting all work until it is resolved would just teach people to bypass
-the pipeline.
+**Warning** — shown on every plan and in the PR comment summary, raised as an
+issue by the weekly reconciler, but never blocks an unrelated change:
 
-Both use `plantimestamp()` rather than `timestamp()`: the latter is unknown at
-plan time, so the condition would only evaluate during apply — after review
-rather than during it.
+| Check | Detects |
+| --- | --- |
+| `installations_are_declared` | An app installed but neither catalogued nor tombstoned — *the app nobody remembers installing*; and a catalogued app set to *All repositories*, which cannot be governed |
+| `catalogue_matches_installations` | A catalogued app that is no longer installed |
+| `tombstones_are_uninstalled` | A decommissioned app that is still — or again — installed, with the reason it was removed |
+| `owners_are_real_teams` | An `owner` that is not an existing team — how ownership silently rots in a reorg |
+| `no_suspended_installations` | A catalogued app suspended outside the runbook; suspension keeps every grant |
+| `reviews_are_due_soon` | An entry within `review_warning_days` (30) of expiry |
 
-Detection does not depend on someone opening a pull request. `reconcile.yml`
-runs the same checks weekly and opens a GitHub issue when the organisation
-stops matching the catalogue, closing it automatically when it matches again.
+Weekly, `reconcile.yml` additionally runs `scripts/verify-repo-controls.sh`,
+which checks the controls `bootstrap/` put on *this* repository.
 
-To see the orphan detector fire, install any app on the org without adding it
-to the catalogue, then run `terraform plan`. To see expiry block, set any
-`review_by` to a past date.
+The split is the point. **A defect introduced by the pull request blocks that
+pull request**, because the author can fix it. **Something that happened
+elsewhere in the org — an orphan, a deleted team — warns**, because halting
+everyone's work until it is resolved would just teach people to bypass the
+pipeline. Expiry is the one exception, and a deliberate one: a review date
+that never stops anything is decoration. With one state file it blocks every
+apply, not only the owner's; per-team state is the fix at scale
+(docs/GOVERNANCE.md §7).
 
-Full design in [docs/GOVERNANCE.md](docs/GOVERNANCE.md).
+Time-based conditions use `plantimestamp()` rather than `timestamp()`: the
+latter is unknown at plan time, so the condition would only evaluate during
+apply — after review rather than during it.
+
+**How these were verified.** The live configuration plans clean against the
+test org with every check passing. Each blocking control and each warning was
+then exercised by planning against the same org with a deliberately broken
+catalogue (a `-var-file` override, plan only): all eleven cases failed or
+warned with the expected message, and the guard was run against the resulting
+saved plans. Expiry blocking and the reconciler issue flow were exercised in
+CI (issue #3). To see the orphan path end to end, install any app without
+cataloguing it and run `gh workflow run reconcile.yml`.
+
+Full design in [docs/GOVERNANCE.md](docs/GOVERNANCE.md); what to do when each
+one fires is in [docs/OPERATIONS.md](docs/OPERATIONS.md).
 
 ---
 
 ## Pointing at a different organisation
 
-1. Change `github_org` in `terraform/variables.tf` (or pass `-var`).
-2. Point the backend elsewhere:
+Every org- or account-specific value, in the order you meet them. Terraform
+forbids variables in `backend` blocks, so the backend values are literals that
+must be edited **and committed** — CI runs a plain `terraform init` and reads
+them from the file.
 
-   ```bash
-   terraform init -reconfigure \
-     -backend-config="bucket=your-bucket" \
-     -backend-config="key=github-app-governance/terraform.tfstate" \
-     -backend-config="region=your-region" \
-     -backend-config="dynamodb_table=your-lock-table"
-   ```
+| File | Values | Notes |
+| --- | --- | --- |
+| `bootstrap/variables.tf` | `github_org`, `github_repo`, **`github_org_id`**, **`github_repo_id`**, `state_bucket`, `lock_table`, `aws_region` | The numeric IDs go into the OIDC trust policy; get them with the `curl` commands in the file's comments. They produce the least helpful error if wrong (see *Authentication*). The bucket name must be globally unique |
+| `bootstrap/variables.tf` | `platform_team_members`, `environment_reviewer_ids`, `app_owner_teams` | Reviewer IDs are numeric user IDs: `gh api users/<login> --jq .id` |
+| `bootstrap/main.tf` and `terraform/versions.tf` | `backend "s3"` `bucket`, `region`, `dynamodb_table` | Same values as above, in both files |
+| `.github/workflows/*.yml` | `AWS_REGION` | Must match the backend region |
+| Repository settings | variables `AWS_PLAN_ROLE_ARN`, `AWS_APPLY_ROLE_ARN`; secret `TF_GITHUB_TOKEN` in **both** environments | Role ARNs are bootstrap outputs. Never a repository-level secret |
+| `terraform/variables.tf` | `github_org` | Or pass `-var github_org=...` |
+| `terraform/catalogue.auto.tfvars` | `repositories`, every `installation_id` and `owner` | IDs are per installation and never carry over — see *Setup* step 3 |
+| `terraform/decommissioned.auto.tfvars` | tombstones | Start from `{}` |
+| `.github/CODEOWNERS` | `@Delta-SK/...` | The team must exist and be visible, or CODEOWNERS silently routes nothing (the reconciler checks) |
 
-3. Update `github_org`, `github_repo`, **`github_org_id` and `github_repo_id`**
-   in `bootstrap/variables.tf` so the OIDC trust policy matches the new
-   repository, along with `platform_team_members` and
-   `environment_reviewer_ids`. Then re-apply `bootstrap/`. The two numeric IDs
-   are the easiest thing to forget and produce the least helpful error — see
-   *Authentication*.
-4. Replace `installation_id` values in `catalogue.auto.tfvars` — they are
-   per-installation and will not carry over.
-5. Update the team names in `.github/CODEOWNERS`.
+Then follow *Setup* from step 1. Nothing else is org-specific: the scripts and
+the reconciler take the repository name from the workflow context.
 
-Nothing else is org-specific.
+For a quick local look without CI, override the backend instead of editing it:
+
+```bash
+terraform init -reconfigure \
+  -backend-config="bucket=your-bucket" \
+  -backend-config="key=github-app-governance/terraform.tfstate" \
+  -backend-config="region=your-region" \
+  -backend-config="dynamodb_table=your-lock-table"
+```
 
 ---
 
 ## Limitations
 
-**Terraform cannot install or uninstall a GitHub App.** It manages only the
-repository scope of an installation that already exists. Installing is a UI or
-API action; uninstalling likewise. This shapes the decommissioning runbook —
-Terraform narrows access to zero, a human removes the installation.
+**Terraform cannot install, suspend or uninstall a GitHub App.** It manages
+only the repository scope of an installation that already exists. For an org
+owner, installing, suspending and uninstalling a third-party app are UI actions
+(org **Settings → GitHub Apps → Configure**); the REST endpoints for suspend
+and uninstall require the app's *own* credentials (a JWT), which you do not
+hold for somebody else's app. This shapes the decommissioning runbook:
+Terraform narrows access to the quarantine repository and then releases the
+app, a human removes the installation.
 
 **Installation IDs are discovered, not derived.** They must be copied into the
-catalogue. The `org_installations` output exists to make that a lookup rather
-than a hunt.
+catalogue. `gh api orgs/<org>/installations` and the `org_installations`
+output make that a lookup rather than a hunt, and a precondition refuses an ID
+that does not belong to the named app.
 
 **The access resource is authoritative.** Applying it removes any repository
 access not in the catalogue. That is the point, but the first apply against an
 existing org will revoke undeclared access — plan before applying to a live
 organisation.
 
-**An installation cannot be reduced to zero repositories.** GitHub returns
-`422 Cannot remove the last repository from this installation`, and the
-provider does not surface it: `terraform apply` reports success, nothing
-changes, and every later plan shows the same pending diff forever. A silent
-drift loop rather than an error.
+**An installation cannot be reduced to zero repositories.** GitHub forbids
+removing an installation's last repository, and the provider (v6.13.0 source,
+`resource_github_app_installation_repositories.go`) handles that by silently
+**skipping all removals** when the list is empty: `terraform apply` reports
+success, nothing changes, and every later plan shows the same pending diff
+forever. Its destroy is subtler still — it removes every repository **except
+one arbitrary one**.
 
-`variables.tf` rejects empty repository lists at plan time for this reason, and
-the `app-quarantine` repository exists so revocation is expressible — an app
-being decommissioned is pointed at a repository containing nothing. Verified
-by applying it against this org and confirming the follow-up plan is clean.
+So: `variables.tf` rejects empty lists; the `app-quarantine` repository exists
+so revocation is expressible; the provider adds before it removes, so moving
+an app onto the quarantine repository is safe (also verified by applying it
+against this org and confirming the follow-up plan is clean); and `scripts/plan-guard.sh`
+refuses to release an app that is not already quarantined, because the
+arbitrary survivor could be `payments-api`. The provider also *errors* when
+reading an installation that no longer exists, which is why the runbook
+releases an app from Terraform **before** it is uninstalled.
 
 **A human-owned PAT is the root credential.** Discussed under *Authentication*.
+
+**`bootstrap/` is not GitOps.** It is applied by hand, with administrator
+credentials, into its own state — deliberately, so the pipeline cannot rewrite
+the controls that constrain it. The cost is that no plan ever looks at it.
+The weekly reconciler compensates by *verifying* the resulting controls on
+this repository (`scripts/verify-repo-controls.sh`); it detects weakening but
+does not repair it.
 
 **The test org is on the GitHub Free plan**, so the managed repositories are
 **public** — branch protection is unavailable on private repositories on Free.
@@ -473,26 +587,39 @@ member of `@Delta-SK/platform-engineering` is also the only author — and GitHu
 does not permit self-approval. Merges here therefore use the org-owner bypass.
 The control is correctly configured and would function normally with a second
 engineer; it simply cannot be *demonstrated* satisfying itself. Adding one more
-account to the org is the only real fix.
+account to the org is the only real fix. The same account also approves its
+own `plan` environment runs; with a real team, enable *prevent self-review* on
+that environment.
 
 **Organisation owners can bypass branch protection** (`enforce_admins` is
 false), so a determined admin can push to `main` without a plan. That mirrors
 how most organisations run — owners retain break-glass access — but it does
 mean branch protection is a guardrail here, not a hard boundary. Turning on
 `enforce_admins` closes it, at the cost of needing a documented break-glass
-procedure for the case where CI itself is broken.
+procedure for the case where CI itself is broken (docs/OPERATIONS.md has the
+procedure as it stands).
 
-**Automated decommissioning is documented but not implemented.** The escalation
-ladder in `docs/GOVERNANCE.md` describes an auto-generated pull request that
-narrows an expired app to zero repositories. Expiry currently blocks the plan
-and the reconciler raises an issue; nothing opens that PR for you.
+**Expiry blocks org-wide.** A resource precondition failure aborts the whole
+plan, so with one state file one team's lapsed app blocks every team's change
+until it is renewed or quarantined. Deliberate, bounded by per-team state at
+scale (docs/GOVERNANCE.md §7).
 
-**Tombstones are a convention, not a control.** Nothing enforces that a removed
-catalogue entry leaves a record behind.
+**Nothing removes access automatically.** Expiry blocks the plan and the
+reconciler raises an issue naming the owner; a human still has to open the
+renewal or quarantine pull request. The auto-generated quarantine PR in the
+escalation ladder is designed, not built.
+
+**A quarantined app is not chased.** Once an app is quarantined it is exempt
+from expiry, and nothing warns if it sits there beyond the soak period. The
+exposure is small — it reaches one empty repository — but it is a loose end.
 
 **One catalogue, one state.** The per-team split described in
 `docs/GOVERNANCE.md` is a design, not an implementation. At two apps it would
 be premature; the point at which it stops being premature is discussed there.
+App access is already decoupled from repository management: an app can
+reference repositories this configuration does not create, and a
+postcondition fails the plan — naming the repository — if one does not
+exist. The remaining coupling is one state file, not one resource graph.
 
 ---
 
@@ -502,17 +629,19 @@ In rough order of what I would add next:
 
 - **Policy-as-code** (OPA/Conftest) for rules the type system cannot express —
   e.g. "no app may reach `payments-api` without a security review label".
-- **Automated decommissioning workflow** — open the narrow-to-zero pull request
-  automatically once an app passes expiry, rather than relying on the owner to
-  act on the blocked plan.
+- **Automated quarantine pull request** — opened by the reconciler once an app
+  passes expiry, so the default outcome is removal rather than a blocked
+  pipeline.
 - **A machine user for the PAT.** The credential is currently tied to a human
   account and carries `admin:org` across every organisation that account
   belongs to. A dedicated machine user with org-owner rights and nothing else
   would bound the blast radius. Environment gating limits *who can use* the
   credential; it does nothing about *how much it can reach*.
-- **Per-team catalogue and state split**, at the point where a single plan
-  becomes slow or a single reviewer becomes a bottleneck.
+- **Per-team catalogue and state split**, with CODEOWNERS routing each team's
+  file to that team.
 - **Permission-change detection.** This governs which repositories an app can
   reach, not what it can do there. An app version bump that widens its
   permission set is invisible to this configuration — see `docs/GOVERNANCE.md`
-  §6, point 4.
+  §6, point 4. The installations data source already exposes `permissions`;
+  snapshotting it into the catalogue and checking for widening is the next
+  step.

@@ -14,6 +14,13 @@ permissions:
   pull-requests: write
   id-token: write
 
+# A new push supersedes the previous plan. Cancelling also withdraws a run
+# still waiting for environment approval, so reviewers only approve the
+# latest commit.
+concurrency:
+  group: terraform-plan-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 env:
   TF_VERSION: "1.9.0"
   AWS_REGION: eu-central-1
@@ -63,17 +70,24 @@ jobs:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
 
+      # Whole repository, so bootstrap/ is held to the same standard.
       - name: terraform fmt
         id: fmt
-        run: terraform fmt -check -recursive -diff
+        run: terraform fmt -check -recursive -diff ..
         continue-on-error: true
 
       - name: terraform init
         run: terraform init -input=false
 
+      # bootstrap/ is applied by hand (see README), so CI cannot plan it — but
+      # it can still catch a change that would not even validate.
       - name: terraform validate
         id: validate
-        run: terraform validate -no-color
+        continue-on-error: true
+        run: |
+          terraform validate -no-color
+          terraform -chdir=../bootstrap init -backend=false -input=false >/dev/null
+          terraform -chdir=../bootstrap validate -no-color
 
       - name: terraform plan
         id: plan
@@ -81,20 +95,48 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.TF_GITHUB_TOKEN }}
         # -lock=false: a plan needs no lock, and taking one would block a
         # concurrent apply for no benefit.
+        if: steps.validate.outcome == 'success'
         run: |
           set +e
           terraform plan -no-color -input=false -lock=false -out=tfplan 2>&1 | tee plan.txt
           echo "exitcode=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
 
+          # Governance checks are warnings and do not move the exit code, so
+          # list them explicitly for the reviewer instead of leaving them
+          # buried in the plan output.
+          : > failed_checks.txt
+          if [ -f tfplan ]; then
+            terraform show -json tfplan \
+              | jq -r '.checks[]? | select(.status == "fail") | .address.to_display' \
+              > failed_checks.txt
+          fi
+
+      # Advisory here: this job runs pull request code, which could edit the
+      # script. The enforcing copy runs in terraform-apply.yml, from main.
+      - name: plan guard
+        id: guard
+        if: steps.plan.outputs.exitcode == '0'
+        continue-on-error: true
+        run: bash ../scripts/plan-guard.sh tfplan 2>&1 | tee guard.txt; exit "${PIPESTATUS[0]}"
+
       - name: Comment plan on PR
+        if: always() && steps.fmt.outcome != 'skipped'
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         env:
           FMT: ${{ steps.fmt.outcome }}
           VALIDATE: ${{ steps.validate.outcome }}
+          PLAN_EXIT: ${{ steps.plan.outputs.exitcode }}
+          GUARD: ${{ steps.guard.outcome }}
         with:
           script: |
             const fs = require('fs');
-            let plan = fs.readFileSync('terraform/plan.txt', 'utf8');
+            const read = (f) => fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : '';
+            let plan = read('terraform/plan.txt') || 'Plan did not run — see fmt/validate above and the workflow log.';
+            const failedChecks = read('terraform/failed_checks.txt').trim().split('\n').filter(Boolean);
+            const planResult = { '0': 'success', '': 'skipped' }[process.env.PLAN_EXIT ?? ''] ?? 'failure';
+            const guardErrors = read('terraform/guard.txt').split('\n')
+              .filter(l => l.startsWith('::error'))
+              .map(l => '> ' + l.replace(/^::error[^:]*::/, ''));
 
             // GitHub rejects comments over 65536 chars.
             const LIMIT = 60000;
@@ -109,7 +151,11 @@ jobs:
               `| --- | --- |`,
               `| fmt | ${process.env.FMT} |`,
               `| validate | ${process.env.VALIDATE} |`,
+              `| plan | ${planResult} |`,
+              `| destroy guard | ${process.env.GUARD || 'skipped'} |`,
+              `| governance checks | ${failedChecks.length ? '⚠️ ' + failedChecks.join(', ') : 'all pass'} |`,
               '',
+              ...(guardErrors.length ? ['**Destroy guard refused this plan:**', '', ...guardErrors, ''] : []),
               '<details><summary>Show plan</summary>',
               '',
               '```terraform',
@@ -118,11 +164,11 @@ jobs:
               '',
               '</details>',
               '',
-              '_Governance check failures appear in the plan output above._',
+              '_Governance checks warn without failing this job — an orphan elsewhere in the org should not block your change. Messages are in the plan output. See docs/OPERATIONS.md._',
             ].join('\n');
 
             const marker = '### Terraform plan';
-            const { data: comments } = await github.rest.issues.listComments({
+            const comments = await github.paginate(github.rest.issues.listComments, {
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
@@ -147,8 +193,12 @@ jobs:
               });
             }
 
-      - name: Fail if fmt, validate or plan failed
-        if: steps.fmt.outcome == 'failure' || steps.plan.outputs.exitcode != '0'
+      - name: Fail if fmt, validate, plan or guard failed
+        if: >-
+          steps.fmt.outcome == 'failure' || steps.validate.outcome == 'failure' ||
+          steps.plan.outputs.exitcode != '0' || steps.guard.outcome == 'failure'
+        env:
+          RESULT: fmt=${{ steps.fmt.outcome }} validate=${{ steps.validate.outcome }} plan_exit=${{ steps.plan.outputs.exitcode }} guard=${{ steps.guard.outcome }}
         run: |
-          echo "fmt=${{ steps.fmt.outcome }} plan_exit=${{ steps.plan.outputs.exitcode }}"
+          echo "$RESULT"
           exit 1

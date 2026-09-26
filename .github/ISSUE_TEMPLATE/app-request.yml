@@ -1,0 +1,53 @@
+name: Request a GitHub App
+description: Ask for a GitHub App to be installed, or for an installed app to reach more repositories.
+title: "App request: <app name>"
+labels: ["app-request"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Apps are installed only after this request is approved. The full process is in
+        docs/OPERATIONS.md, "Request a new app". Expect a reply from @Delta-SK/platform-engineering.
+  - type: input
+    id: app
+    attributes:
+      label: App
+      description: Name and Marketplace or vendor link.
+    validations:
+      required: true
+  - type: input
+    id: owner
+    attributes:
+      label: Owning team
+      description: The GitHub team that will answer for this app (never a person). It must already exist.
+      placeholder: web-team
+    validations:
+      required: true
+  - type: textarea
+    id: purpose
+    attributes:
+      label: Purpose
+      description: What the app does, in one line, for someone who has never heard of it.
+    validations:
+      required: true
+  - type: textarea
+    id: justification
+    attributes:
+      label: Justification
+      description: Why the organisation should accept a third party having this access. What happens if we say no?
+    validations:
+      required: true
+  - type: textarea
+    id: repositories
+    attributes:
+      label: Repositories
+      description: One per line. Only the repositories the app actually needs — "All repositories" is not available.
+    validations:
+      required: true
+  - type: textarea
+    id: permissions
+    attributes:
+      label: Permissions the app requests
+      description: Copy them from the app's install page (for example "Contents - read and write").
+    validations:
+      required: true

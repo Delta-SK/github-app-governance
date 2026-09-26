@@ -362,7 +362,7 @@ audited as code.
 | API rate limits | The installations read is one call; per-app resources are not. Paginate, back off, and split state before this bites |
 | Blast radius of a bad apply | Per-team state means a mistake affects one team |
 | Signal fatigue | Orphan and expiry findings need SLAs and routing, not a wall of warnings. One issue per team rather than one per org |
-| Plan approvals | Already solved for the common case: catalogue pull requests plan automatically, because the plan runs main's code on the pull request's data. Only code changes wait for a platform-engineering approval — with self-review prevented once the team has more than one member |
+| Plan approvals | None needed. Catalogue pull requests are planned by main's code with the admin token (data cannot execute); code pull requests by their own code with a read-only token. The only approval is the pull request review, made with both plans in view |
 | Credential | On Enterprise Cloud: an enterprise-owned GitHub App with only *Enterprise organization installation repositories* — no human token at all. Elsewhere: a machine user's PAT in a secrets manager with rotation (README, *Authentication*) |
 | Many organisations | The enterprise installations API lists every installation in every organisation of the enterprise: one reconciler, one inventory, orphans visible org-wide rather than per org |
 | Audit evidence | Git history *is* the audit trail: who approved what access, when, and why — plus the plan of record in each apply log |

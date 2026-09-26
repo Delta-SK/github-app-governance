@@ -237,7 +237,7 @@ platform team handles them.
 
 | What | Why | How to get it |
 | --- | --- | --- |
-| Member of `@Delta-SK/platform-engineering` | CODEOWNER reviews; approving code plans (`plan-code`) | An org owner adds you to `platform_team_members` in `bootstrap/variables.tf` (as `member`) and re-applies bootstrap. You receive an organisation invitation; you can review once you accept it |
+| Member of `@Delta-SK/platform-engineering` | CODEOWNER reviews — the one approval every change needs | An org owner adds you to `platform_team_members` in `bootstrap/variables.tf` (as `member`) and re-applies bootstrap. You receive an organisation invitation; you can review once you accept it |
 | Org owner | Installing, suspending and uninstalling apps; break-glass | Org owners only |
 | `gh` CLI, logged in | Every command below | `gh auth login` |
 | Terraform at the version in `.terraform-version` (`tfenv install` / `mise install` read it), AWS read access to the state bucket, the classic PAT | Only for local inspection, bootstrap, and rare state operations | Ask the credential owner. **Never paste the PAT into chat, a ticket, or a terminal that is being shared** |
@@ -246,35 +246,29 @@ Most of the job needs nothing but the GitHub web interface and `gh`.
 
 ### Daily — 5 minutes
 
-1. **Code plans waiting for approval.** Catalogue pull requests plan by
-   themselves. Only a pull request that changes code — `*.tf`, `scripts/`,
-   `.github/workflows/`, `.terraform-version` — starts a `terraform-plan-code`
-   run, which waits for you: Actions tab → run marked *Waiting* → **Review
-   deployments**. That run executes the pull request's own code with the
-   org-admin credential, so before approving:
-   - Open **Files changed** and **read every line** under `.github/` and
-     `scripts/`, and every `*.tf` change. Look for anything that sends data
-     anywhere, runs extra programs, or adds providers.
-   - If in doubt, do not approve — ask in the pull request. The automatic
-     catalogue plan is still there; only the code plan is withheld.
-   - You cannot approve a code plan for code you pushed yourself; another
-     team member has to.
-2. **Review catalogue pull requests.** Use the reviewer checklist in the pull
-   request template. In particular:
+1. **Review pull requests.** Nothing waits for you before review: every pull
+   request is planned automatically, and the plans are on it when you open
+   it. Use the reviewer checklist in the pull request template. In
+   particular:
    - The **Terraform plan — catalogue** comment shows only the change
-     described, *destroy guard* is `success`, and both checks are green.
-   - If that comment carries the ⚠️ *also changes code* note, the plan does
-     not show the code change: read the **Terraform plan — this pull
-     request's code** comment instead (step 1).
+     described, *destroy guard* is `success`, and the checks are green.
+   - If that comment carries the ⚠️ *also changes code* note, it does not
+     show the code change. Read the second comment, **Terraform plan — this
+     pull request's code**: it plans the pull request's own code (with a
+     read-only token, not refreshed against live GitHub). And read every line
+     under `.github/`, `scripts/` and every `*.tf` change — look for anything
+     that sends data anywhere, runs extra programs, or adds providers. After
+     merge that code runs on `main` with the admin token; your approval is
+     what allows it.
    - New app or new repository: the app's permissions (org **Settings →
      GitHub Apps → app → Configure**) are proportionate to the repositories
      it gains. `contents: write` on `payments-api` deserves a second look.
    - The owner is a real team that has agreed, and `review_by` is sensible
      for the risk.
-3. **Merge** with **Squash and merge**, then glance at the `terraform-apply`
+2. **Merge** with **Squash and merge**, then glance at the `terraform-apply`
    run: *plan of record* shows what was applied, *Show resulting access
    matrix* the result.
-4. **App requests.** Issues labelled `app-request`: review, reply, and if
+3. **App requests.** Issues labelled `app-request`: review, reply, and if
    approved install the app (see [Install an approved app](#install-an-approved-app)).
 
 ### Weekly — Monday, after 07:00 UTC
@@ -333,9 +327,11 @@ The `reconcile` workflow runs at 07:00 UTC. Then:
    Contact owners with dates in the next 60 days.
 2. **Stalled removals:** any app with `decommissioning = true` for more than
    a month should be released (stage 3) or have a reason in its pull request.
-3. **Token expiry:** check the classic PAT's expiry date (the token owner's
-   **Settings → Developer settings → Personal access tokens**). Rotate at
-   least two weeks before it expires.
+3. **Token expiry:** check both tokens' expiry dates (the owner's
+   **Settings → Developer settings → Personal access tokens**, classic and
+   fine-grained). Rotate at least two weeks before either expires — an
+   expired read-only token fails every code plan, an expired admin token
+   fails every plan and apply.
 4. **Versions Dependabot does not manage** (the rest arrive as Dependabot
    pull requests every Monday — review them like any code change):
    - Terraform CLI: compare `.terraform-version` with the latest release
@@ -391,17 +387,27 @@ state is repaired by hand.
 
 ### Rotate the GitHub token
 
-The pipeline uses one classic personal access token (`repo`, `admin:org`),
-stored as the secret `TF_GITHUB_TOKEN` in **three** environments.
+The pipeline uses two tokens, each an **environment** secret, never a
+repository secret:
 
-1. The token's owner creates a new classic token with exactly `repo` and
-   `admin:org`, with an expiry date.
-2. Store it in all three environments — never as a repository secret:
+| Secret | Kind | Environments | Scopes |
+| --- | --- | --- | --- |
+| `TF_GITHUB_TOKEN` | classic PAT | `plan`, `production` | exactly `repo`, `admin:org` |
+| `TF_GITHUB_READ_TOKEN` | fine-grained PAT, owner = the org | `plan-code` | all repositories; organisation *Administration: read*, *Members: read*; nothing else |
+
+**Never** put `TF_GITHUB_TOKEN` in `plan-code`: that environment runs pull
+request code with no approval. The weekly controls check fails if it is there.
+
+1. The token's owner creates the replacement with exactly the scopes above
+   and an expiry date.
+2. Store it:
 
    ```bash
-   for env in plan plan-code production; do
-     gh secret set TF_GITHUB_TOKEN --env "$env" -R Delta-SK/github-app-governance
-   done
+   R=Delta-SK/github-app-governance
+   # the admin token
+   for env in plan production; do gh secret set TF_GITHUB_TOKEN --env "$env" -R $R; done
+   # or the read-only token
+   gh secret set TF_GITHUB_READ_TOKEN --env plan-code -R $R
    ```
 
    (`gh` prompts for the value, so it never lands in shell history.)
@@ -455,8 +461,9 @@ workflow and every engineer's version manager reads.
 3. Locally, with the new version: `terraform init -upgrade` and
    `terraform validate` in both directories; `terraform plan` in
    `terraform/` must show no changes.
-4. Open the pull request. It is a code change, so approve its
-   `terraform-plan-code` run and check that plan shows no changes too.
+4. Open the pull request. It is a code change, so check its
+   **Terraform plan — this pull request's code** comment shows no changes
+   too.
 5. Merge. The next apply writes state with the new version; from then on
    older binaries refuse it, so tell the team to upgrade.
 

@@ -60,9 +60,9 @@ done
 jq -e '.enabled == true' <<<"$(get "repos/$repo/private-vulnerability-reporting")" >/dev/null ||
   problem "private vulnerability reporting is off — SECURITY.md points reporters to it"
 
-# The trust model (README, "The trust boundary"): the credential is reachable
-# only from workflow definitions on a protected branch (plan, production), or
-# after a human approves (plan-code, which runs pull request code).
+# The trust model (README, "The trust boundary"): the admin credential is
+# reachable only from workflow definitions on main (plan, production). Pull
+# request code (plan-code) gets a read-only token.
 for env in plan production; do
   env_json=$(get "repos/$repo/environments/$env")
   policies=$(gh api "repos/$repo/environments/$env/deployment-branch-policies" \
@@ -74,13 +74,19 @@ for env in plan production; do
     problem "administrators can bypass the '$env' environment's protection rules"
 done
 
-plan_code=$(get "repos/$repo/environments/plan-code")
-jq -e '[.protection_rules[]?.type] | index("required_reviewers")' <<<"$plan_code" >/dev/null ||
-  problem "the 'plan-code' environment has no required reviewers — pull request code could read TF_GITHUB_TOKEN unattended"
-jq -e '[.protection_rules[]? | select(.type == "required_reviewers") | .prevent_self_review] | any' <<<"$plan_code" >/dev/null ||
-  problem "the 'plan-code' environment lets the author of a change release the credential to it"
-jq -e '.can_admins_bypass == false' <<<"$plan_code" >/dev/null ||
-  problem "administrators can bypass the 'plan-code' environment's required reviewers"
+# plan-code runs pull request code automatically, with no reviewer. That is
+# safe only while it holds the read-only token and never the admin one.
+plan_code_secrets=$(gh api "repos/$repo/environments/plan-code/secrets" \
+  --jq '[.secrets[].name] | join(",")' 2>/dev/null) || plan_code_secrets=unknown
+case ",$plan_code_secrets," in
+*,TF_GITHUB_TOKEN,*)
+  problem "the 'plan-code' environment holds TF_GITHUB_TOKEN — pull request code runs there unattended and must only ever see TF_GITHUB_READ_TOKEN"
+  ;;
+*,TF_GITHUB_READ_TOKEN,*) ;;
+*)
+  problem "the 'plan-code' environment has no TF_GITHUB_READ_TOKEN (secrets: ${plan_code_secrets:-none}) — code plans will fail"
+  ;;
+esac
 
 secrets=$(gh api "repos/$repo/actions/secrets" --jq .total_count 2>/dev/null) || secrets=unknown
 [ "$secrets" = "0" ] ||

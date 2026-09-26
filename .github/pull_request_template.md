@@ -32,5 +32,5 @@
 
 - [ ] `validate` and `terraform-plan` are green
 - [ ] The **Terraform plan — catalogue** comment shows only the changes described above, and `destroy guard` is `success`
-- [ ] If that comment says the PR **also changes code**: every line under `.github/`, `scripts/` and `*.tf` has been read before approving the `terraform-plan-code` run, and its plan matches the intent
+- [ ] If that comment says the PR **also changes code**: the **Terraform plan — this pull request's code** comment matches the intent, and every line under `.github/`, `scripts/` and `*.tf` has been read — after merge it runs with the admin token
 - [ ] The app's permissions (org Settings → GitHub Apps → the app) are appropriate for the repositories it gains

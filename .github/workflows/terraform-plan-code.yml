@@ -26,10 +26,8 @@ on:
       - "scripts/**"
       - ".github/workflows/**"
 
-permissions:
-  contents: read
-  pull-requests: write # the plan comment
-  id-token: write # OIDC to the read-only state role
+# Nothing at workflow level: each job requests exactly what it needs.
+permissions: {}
 
 concurrency:
   group: terraform-plan-code-${{ github.event.pull_request.number }}
@@ -42,6 +40,10 @@ jobs:
   plan-code:
     name: plan-code
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: write # the plan comment
+      id-token: write # OIDC to the read-only state role
 
     # Dependabot's runs receive no environment secrets, so this could only
     # fail. Its version bumps are reviewed as diffs, validated, and planned

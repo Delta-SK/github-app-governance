@@ -331,6 +331,9 @@ The `reconcile` workflow runs at 07:00 UTC. Then:
    - Runner image: every workflow uses `ubuntu-24.04`. When GitHub announces
      its deprecation, move all workflows to the next LTS image in one pull
      request. Never use `ubuntu-latest`.
+   - OpenSSF Scorecard: open the badge's report. A drop in
+     *Pinned-Dependencies*, *Token-Permissions* or *Dangerous-Workflow* means
+     a workflow change weakened the supply chain — fix it that month.
    - Run log warnings: open the latest `terraform-apply` run and check the
      annotations. Any deprecation notice (an action runtime, a provider
      argument, a Terraform feature) gets a pull request that month, not

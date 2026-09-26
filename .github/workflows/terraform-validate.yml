@@ -8,8 +8,8 @@ name: terraform-validate
 on:
   pull_request:
 
-permissions:
-  contents: read
+# Nothing at workflow level: each job requests exactly what it needs.
+permissions: {}
 
 concurrency:
   group: terraform-validate-${{ github.event.pull_request.number }}
@@ -19,6 +19,8 @@ jobs:
   validate:
     name: validate
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

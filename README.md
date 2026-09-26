@@ -1,5 +1,12 @@
 # GitHub App Governance
 
+[![apply](https://img.shields.io/github/actions/workflow/status/Delta-SK/github-app-governance/terraform-apply.yml?branch=main&label=apply&logo=terraform)](https://github.com/Delta-SK/github-app-governance/actions/workflows/terraform-apply.yml)
+[![org matches catalogue](https://img.shields.io/github/actions/workflow/status/Delta-SK/github-app-governance/reconcile.yml?branch=main&label=org%20matches%20catalogue)](https://github.com/Delta-SK/github-app-governance/actions/workflows/reconcile.yml)
+[![open findings](https://img.shields.io/github/issues/Delta-SK/github-app-governance/reconciliation?label=open%20findings&color=informational)](https://github.com/Delta-SK/github-app-governance/issues?q=is%3Aissue+is%3Aopen+label%3Areconciliation)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/Delta-SK/github-app-governance/badge)](https://scorecard.dev/viewer/?uri=github.com/Delta-SK/github-app-governance)
+[![IaC: Terraform](https://img.shields.io/badge/IaC-Terraform-7B42BC?logo=terraform&logoColor=white)](https://developer.hashicorp.com/terraform)
+[![Dependabot](https://img.shields.io/badge/dependencies-Dependabot-025E8C?logo=dependabot)](.github/dependabot.yml)
+
 GitOps-managed control of **which repositories each installed GitHub App can
 reach**, in the `Delta-SK` organisation.
 
@@ -42,6 +49,7 @@ State: s3://delta-sk-tfstate-751569314116 (S3-native lock)
 
 reconcile.yml            weekly: plan + checks + repo controls
                          -> opens / updates / closes one issue
+scorecard.yml            weekly + on push: OpenSSF Scorecard -> badge, Security tab
 ```
 
 | Path | Purpose |
@@ -60,6 +68,7 @@ reconcile.yml            weekly: plan + checks + repo controls
 | `bootstrap/` | State backend, OIDC roles, this repo's branch protection, environments, teams. Applied by hand |
 | `.terraform-version` | The one exact Terraform version, for CI and for every engineer |
 | `.github/dependabot.yml` | Keeps pinned actions and providers current |
+| `.github/workflows/scorecard.yml` | OpenSSF Scorecard: independent supply-chain review, published as the badge |
 | `.markdownlint-cli2.jsonc` | Markdown rules for the docs, enforced in CI |
 | `docs/GOVERNANCE.md` | The operating model: ownership, review, expiry, orphans, decommissioning, scale |
 | `docs/OPERATIONS.md` | Step-by-step daily guide, for app owners and for the platform team |
@@ -195,6 +204,7 @@ The current design separates **code** from **data** instead:
 | `terraform-plan-code` | `pull_request`, code paths only | the PR's | the PR's | yes | **yes** (`plan-code`) |
 | `terraform-apply` | push to `main` | main's | main's | yes (write) | no — the PR was the gate |
 | `reconcile` | weekly | main's | main's | yes | no |
+| `scorecard` | weekly, push to `main` | main's (a third-party action) | main's | **none** — default token only | no |
 
 Why `terraform-plan` is safe without approval:
 
@@ -593,7 +603,11 @@ and everything that can be kept current automatically is.
 | Runner image | `ubuntu-24.04` | every `runs-on:` | Hand — never `ubuntu-latest`, which moves to a new OS under you |
 | State locking | S3-native `use_lockfile` | both `backend "s3"` blocks | — (replaced the deprecated DynamoDB lock) |
 
-All actions run on Node.js 24; none is on a deprecated runtime. `.terraform/`
+Every JavaScript action runs on Node.js 24; none is on a deprecated runtime.
+The one container action, Scorecard, is SHA-pinned, but its `action.yaml`
+references its image as `ghcr.io/ossf/scorecard-action:v2.4.4` — a registry
+tag, which is mutable. That residual is accepted: it is OpenSSF's own release,
+and the job holds no credential beyond its two narrow permissions. `.terraform/`
 is never committed; lock files always are.
 
 ---
@@ -671,6 +685,14 @@ it never runs pull request code — and it stays safe only while that remains
 true. A future edit that checks out and runs anything from the pull request
 would hand the admin credential to every branch. The file says so at the top,
 and CODEOWNERS routes every change to it to the platform team.
+
+**The OpenSSF Scorecard badge under-reports two checks, knowingly.**
+*Branch-Protection*: Scorecard cannot read classic branch protection without
+an admin token, and the organisation-admin PAT is never given to a
+third-party action. Moving this repository's protection to repository rules
+(`github_repository_ruleset`) would make it visible without one. *Code-Review*:
+merges in the single-account test org use the admin bypass (below), which
+Scorecard correctly counts as unreviewed.
 
 **Organisation owners can bypass branch protection** (`enforce_admins` is
 false), so a determined admin can push to `main` without a plan. That mirrors

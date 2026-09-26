@@ -5,8 +5,6 @@
 Build a working GitOps-managed system for governing GitHub App
 installation repository access across a GitHub organization.
 
-This is a DevOps Engineer II take-home assignment.
-
 ## Acceptance criteria
 
 The implementation must demonstrate:
@@ -36,8 +34,6 @@ The implementation must demonstrate:
    - safe decommissioning
 
 ## Constraints
-
-This is an 8-hour homework assignment.
 
 Prefer a small, working implementation over an over-engineered
 production platform.

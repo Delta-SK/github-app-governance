@@ -1,10 +1,11 @@
 terraform {
-  required_version = "~> 1.9.0"
+  # Exact version pinned in /.terraform-version; see ../terraform/versions.tf.
+  required_version = "~> 1.16.0"
 
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = "~> 5.0"
+      version = "~> 6.0"
     }
     github = {
       source  = "integrations/github"
@@ -20,11 +21,11 @@ terraform {
   # Against a brand new account, comment this block out for the first apply,
   # then restore it and migrate. See README "Bootstrap the backend".
   backend "s3" {
-    bucket         = "delta-sk-tfstate-751569314116"
-    key            = "github-app-governance/bootstrap.tfstate"
-    region         = "eu-central-1"
-    dynamodb_table = "delta-sk-tfstate-lock"
-    encrypt        = true
+    bucket       = "delta-sk-tfstate-751569314116"
+    key          = "github-app-governance/bootstrap.tfstate"
+    region       = "eu-central-1"
+    use_lockfile = true
+    encrypt      = true
   }
 }
 
@@ -94,25 +95,17 @@ resource "aws_s3_bucket_public_access_block" "state" {
   restrict_public_buckets = true
 }
 
-resource "aws_dynamodb_table" "lock" {
-  name         = var.lock_table
-  billing_mode = "PAY_PER_REQUEST"
-  hash_key     = "LockID"
-
-  attribute {
-    name = "LockID"
-    type = "S"
-  }
-}
-
 # ---------------------------------------------------------------------------
 # GitHub Actions OIDC federation — no long-lived AWS keys in GitHub secrets
 # ---------------------------------------------------------------------------
 
+# No thumbprint_list: AWS validates GitHub's OIDC endpoint against its own
+# trusted CA store and ignores the thumbprint. A pinned thumbprint is a value
+# that looks load-bearing, is not, and goes stale when GitHub rotates
+# certificates — exactly the drift this configuration avoids elsewhere.
 resource "aws_iam_openid_connect_provider" "github" {
-  url             = "https://token.actions.githubusercontent.com"
-  client_id_list  = ["sts.amazonaws.com"]
-  thumbprint_list = ["6938fd4d98bab03faadb97b34396831e3780aea1"]
+  url            = "https://token.actions.githubusercontent.com"
+  client_id_list = ["sts.amazonaws.com"]
 }
 
 locals {
@@ -124,15 +117,11 @@ locals {
   subject_prefix = "repo:${var.github_org}@${var.github_org_id}/${var.github_repo}@${var.github_repo_id}"
 }
 
-# Two roles, split by trust boundary.
+# Two roles, split by what they may do to state.
 #
-# Pull request code is UNTRUSTED: for pull_request events GitHub runs the
-# workflow definition from the PR head, so anyone who can push a branch can
-# rewrite the plan job. That job must therefore never hold credentials capable
-# of mutating state. Plan reads state and runs with -lock=false, so read-only
-# S3 access is sufficient and no DynamoDB access is needed at all.
-#
-# Code on main is TRUSTED: it has been through review and merge.
+# Every plan — automatic or approval-gated — reads state and runs with
+# -lock=false, so it needs read-only access to the state object and nothing
+# else. Only the apply job on main writes state and takes the lock.
 
 data "aws_iam_policy_document" "assume_plan" {
   statement {
@@ -159,14 +148,18 @@ data "aws_iam_policy_document" "assume_plan" {
     # deployment branch policy, so "which branches may assume this role" is
     # enforced by the environment rather than duplicated in IAM.
     #
-    # plan       -> untrusted PR code, read-only state
-    # production -> trusted main-only code; the reconciler runs here and also
-    #               takes this read-only role, which costs nothing.
+    # plan       -> main's code planning a PR's catalogue data (automatic)
+    # plan-code  -> a PR's own code, after a human approves the run
+    # production -> main only; the reconciler runs here and takes this
+    #               read-only role, which costs nothing.
+    #
+    # StringEquals, not StringLike: there are no wildcards to match.
     condition {
-      test     = "StringLike"
+      test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
       values = [
         "${local.subject_prefix}:environment:plan",
+        "${local.subject_prefix}:environment:plan-code",
         "${local.subject_prefix}:environment:production",
       ]
     }
@@ -189,11 +182,11 @@ data "aws_iam_policy_document" "assume_apply" {
       values   = ["sts.amazonaws.com"]
     }
 
-    # Only the production environment, which is itself restricted to protected
-    # branches. The plan environment is deliberately absent: untrusted pull
-    # request code must never reach a credential that can mutate state.
+    # Only the production environment, which only main may deploy to. Neither
+    # plan environment is here: nothing that runs on a pull request may reach
+    # a credential that can mutate state.
     condition {
-      test     = "StringLike"
+      test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
       values   = ["${local.subject_prefix}:environment:production"]
     }
@@ -202,7 +195,7 @@ data "aws_iam_policy_document" "assume_apply" {
 
 resource "aws_iam_role" "plan" {
   name               = "github-app-governance-plan"
-  description        = "Read-only state access for PR-triggered plans. Assumed by untrusted PR code."
+  description        = "Read-only state access for plans and the reconciler."
   assume_role_policy = data.aws_iam_policy_document.assume_plan.json
 }
 
@@ -261,10 +254,13 @@ data "aws_iam_policy_document" "state_write" {
     resources = [local.main_state_arn]
   }
 
+  # S3-native locking: the lock is an object next to the state, created with
+  # a conditional write and deleted on release. Delete is granted on the lock
+  # object only, never on the state.
   statement {
     effect    = "Allow"
-    actions   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:DeleteItem"]
-    resources = [aws_dynamodb_table.lock.arn]
+    actions   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
+    resources = ["${local.main_state_arn}.tflock"]
   }
 }
 

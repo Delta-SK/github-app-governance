@@ -1,35 +1,9 @@
-variable "github_org" {
-  description = "GitHub organisation being governed."
-  type        = string
-  default     = "Delta-SK"
-}
-
-variable "review_warning_days" {
-  description = "How long before review_by to start warning on every plan. Expiry itself blocks; this is the advance notice."
-  type        = number
-  default     = 30
-}
-
-variable "max_review_days" {
-  description = "Furthest a review_by date may be set in the future. Without a ceiling, `review_by = \"2099-12-31\"` quietly opts an app out of review."
-  type        = number
-  default     = 366
-}
-
-variable "quarantine_repository" {
-  description = <<-EOT
-    Repository that apps being decommissioned are narrowed to. GitHub will not
-    let an installation drop its last repository, so "revoke all access" has
-    to be expressed as "point it at a repository containing nothing".
-  EOT
-  type        = string
-  default     = "app-quarantine"
-
-  validation {
-    condition     = contains(keys(var.repositories), var.quarantine_repository)
-    error_message = "The quarantine repository must be declared in `repositories`, so this configuration controls what it contains."
-  }
-}
+// Only DATA is a variable. Every value here is set from a *.tfvars file, and
+// every *.tfvars file is catalogue data that pull requests change and that
+// terraform-plan.yml plans automatically. Anything declared as a variable is
+// therefore something a catalogue pull request can set. The rules that judge
+// the catalogue live in settings.tf as locals, where changing them is a code
+// change with its own review path.
 
 variable "repositories" {
   description = <<-EOT
@@ -42,6 +16,11 @@ variable "repositories" {
     description = string
     topics      = optional(list(string), [])
   }))
+
+  validation {
+    condition     = contains(keys(var.repositories), local.quarantine_repository)
+    error_message = "The quarantine repository (${local.quarantine_repository}) must be declared in `repositories`, so this configuration controls what it contains."
+  }
 }
 
 variable "app_catalogue" {
@@ -87,10 +66,10 @@ variable "app_catalogue" {
     condition = alltrue([
       for a in var.app_catalogue :
       a.decommissioning
-      ? (length(a.repositories) == 1 && contains(a.repositories, var.quarantine_repository))
-      : !contains(a.repositories, var.quarantine_repository)
+      ? (length(a.repositories) == 1 && contains(a.repositories, local.quarantine_repository))
+      : !contains(a.repositories, local.quarantine_repository)
     ])
-    error_message = "An app with decommissioning = true must list exactly the quarantine repository (${var.quarantine_repository}), and no other app may list it."
+    error_message = "An app with decommissioning = true must list exactly the quarantine repository (${local.quarantine_repository}), and no other app may list it."
   }
 
   # A placeholder such as "TBD" would plan cleanly (nothing calls the API for a

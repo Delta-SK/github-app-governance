@@ -1,0 +1,9 @@
+// Markdown style for README.md and docs/, checked by terraform-validate.yml.
+{
+  "config": {
+    // Prose is wrapped by hand for readable diffs; tables and URLs cannot wrap.
+    "MD013": false
+  },
+  "globs": ["**/*.md"],
+  "ignores": ["**/.terraform/**", "CLAUDE.md"]
+}

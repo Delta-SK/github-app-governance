@@ -24,8 +24,10 @@ get() {
 }
 
 prot=$(get "repos/$repo/branches/main/protection")
-jq -e '.required_status_checks.contexts // [] | index("plan")' <<<"$prot" >/dev/null ||
-  problem "main does not require the 'plan' status check"
+for ctx in validate terraform-plan; do
+  jq -e --arg c "$ctx" '.required_status_checks.contexts // [] | index($c)' <<<"$prot" >/dev/null ||
+    problem "main does not require the '$ctx' status check"
+done
 jq -e '.required_pull_request_reviews.require_code_owner_reviews == true' <<<"$prot" >/dev/null ||
   problem "main does not require CODEOWNER review"
 jq -e '(.required_pull_request_reviews.required_approving_review_count // 0) >= 1' <<<"$prot" >/dev/null ||
@@ -33,13 +35,25 @@ jq -e '(.required_pull_request_reviews.required_approving_review_count // 0) >= 
 jq -e '.allow_force_pushes.enabled == false' <<<"$prot" >/dev/null ||
   problem "force pushes to main are allowed (or main is unprotected)"
 
-jq -e '[.protection_rules[]?.type] | index("required_reviewers")' \
-  <<<"$(get "repos/$repo/environments/plan")" >/dev/null ||
-  problem "the 'plan' environment has no required reviewers — pull request code could read TF_GITHUB_TOKEN unattended"
+# The trust model (README, "The trust boundary"): the credential is reachable
+# only from workflow definitions on a protected branch (plan, production), or
+# after a human approves (plan-code, which runs pull request code).
+for env in plan production; do
+  env_json=$(get "repos/$repo/environments/$env")
+  policies=$(gh api "repos/$repo/environments/$env/deployment-branch-policies" \
+    --jq '[.branch_policies[] | "\(.type):\(.name)"] | sort | join(",")' 2>/dev/null) || policies=unknown
+  { jq -e '.deployment_branch_policy.custom_branch_policies == true' <<<"$env_json" >/dev/null &&
+    [ "$policies" = "branch:main" ]; } ||
+    problem "the '$env' environment is not restricted to main alone (policies: ${policies:-none}) — other branches could read TF_GITHUB_TOKEN"
+  jq -e '.can_admins_bypass == false' <<<"$env_json" >/dev/null ||
+    problem "administrators can bypass the '$env' environment's protection rules"
+done
 
-jq -e '.deployment_branch_policy.protected_branches == true' \
-  <<<"$(get "repos/$repo/environments/production")" >/dev/null ||
-  problem "the 'production' environment is not restricted to protected branches"
+plan_code=$(get "repos/$repo/environments/plan-code")
+jq -e '[.protection_rules[]?.type] | index("required_reviewers")' <<<"$plan_code" >/dev/null ||
+  problem "the 'plan-code' environment has no required reviewers — pull request code could read TF_GITHUB_TOKEN unattended"
+jq -e '.can_admins_bypass == false' <<<"$plan_code" >/dev/null ||
+  problem "administrators can bypass the 'plan-code' environment's required reviewers"
 
 secrets=$(gh api "repos/$repo/actions/secrets" --jq .total_count 2>/dev/null) || secrets=unknown
 [ "$secrets" = "0" ] ||

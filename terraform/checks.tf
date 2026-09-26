@@ -33,7 +33,7 @@ locals {
   due_soon = sort([
     for slug, app in var.app_catalogue :
     "${slug} (owner: ${app.owner}, due ${app.review_by})"
-    if !app.decommissioning && timecmp(timeadd(plantimestamp(), "${var.review_warning_days * 24}h"), "${app.review_by}T00:00:00Z") >= 0
+    if !app.decommissioning && timecmp(timeadd(plantimestamp(), "${local.review_warning_days * 24}h"), "${app.review_by}T00:00:00Z") >= 0
   ])
 
   suspended = sort([
@@ -91,7 +91,7 @@ check "reviews_are_due_soon" {
   // gives owners advance warning so the deadline is not a surprise.
   assert {
     condition     = length(local.due_soon) == 0
-    error_message = "App(s) due for review within ${var.review_warning_days} days: ${join(", ", local.due_soon)}. Re-confirm the access is still needed before the date passes — after it, plans fail."
+    error_message = "App(s) due for review within ${local.review_warning_days} days: ${join(", ", local.due_soon)}. Re-confirm the access is still needed before the date passes — after it, plans fail."
   }
 }
 

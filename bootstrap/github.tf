@@ -44,7 +44,7 @@ resource "github_team" "app_owners" {
 }
 
 resource "github_team_members" "platform_engineering" {
-  team_id = github_team.platform_engineering.id
+  team_slug = github_team.platform_engineering.slug
 
   dynamic "members" {
     for_each = var.platform_team_members
@@ -61,9 +61,17 @@ resource "github_branch_protection" "governance_main" {
   repository_id = data.github_repository.governance.node_id
   pattern       = "main"
 
+  // validate       - job in terraform-validate.yml: fmt/validate of the PR's
+  //                  own code, no credentials.
+  // terraform-plan - commit status posted on the PR head by
+  //                  terraform-plan.yml, which runs main's code on the PR's
+  //                  catalogue data. A status rather than the job's check
+  //                  run, because pull_request_target runs against the base
+  //                  commit and its check run is not guaranteed to attach to
+  //                  the PR head.
   required_status_checks {
     strict   = true
-    contexts = ["plan"]
+    contexts = ["validate", "terraform-plan"]
   }
 
   required_pull_request_reviews {
@@ -84,29 +92,66 @@ resource "github_branch_protection" "governance_main" {
 // ---------------------------------------------------------------------------
 // Environments — the trust boundary for credentials
 // ---------------------------------------------------------------------------
+//
+// TF_GITHUB_TOKEN (an organisation-admin PAT) lives in these environments,
+// never as a repository secret, so no job can read it implicitly. The rule
+// they encode: the credential reaches either code already on main, or pull
+// request code that a human has looked at — never unreviewed code.
+//
+//   plan       main only, no reviewer. terraform-plan.yml is a
+//              pull_request_target workflow: GitHub runs main's definition
+//              of it, which plans main's code against the PR's *.tfvars
+//              data. Data cannot execute, so no approval is needed.
+//   plan-code  reviewers required. terraform-plan-code.yml runs a PR's own
+//              Terraform code, which could do anything with the credential.
+//   production main only, no reviewer. The pull request was the gate.
+//
+// can_admins_bypass = false everywhere: an administrator gains nothing
+// legitimate from bypassing, and it keeps the rule above exceptionless.
 
-// The plan job runs untrusted PR code. Holding TF_GITHUB_TOKEN as a
-// repository secret would make it readable by any job, including one a
-// contributor rewrote in their own pull request. Scoping it to an environment
-// with required reviewers means a human releases it per run.
 resource "github_repository_environment" "plan" {
-  repository  = data.github_repository.governance.name
-  environment = "plan"
+  repository        = data.github_repository.governance.name
+  environment       = "plan"
+  can_admins_bypass = false
 
-  reviewers {
-    users = var.environment_reviewer_ids
+  deployment_branch_policy {
+    protected_branches     = false
+    custom_branch_policies = true
   }
 }
 
-// Apply runs code already merged to main, so it needs no human gate beyond
-// the pull request that merged it — but it is pinned to protected branches so
-// the credential cannot be reached from an arbitrary ref.
+resource "github_repository_environment" "plan_code" {
+  repository        = data.github_repository.governance.name
+  environment       = "plan-code"
+  can_admins_bypass = false
+
+  // The team, not named individuals: whoever is on the platform team can
+  // release a run, and leaving the team revokes it.
+  reviewers {
+    teams = [tonumber(github_team.platform_engineering.id)]
+  }
+}
+
 resource "github_repository_environment" "production" {
-  repository  = data.github_repository.governance.name
-  environment = "production"
+  repository        = data.github_repository.governance.name
+  environment       = "production"
+  can_admins_bypass = false
 
   deployment_branch_policy {
-    protected_branches     = true
-    custom_branch_policies = false
+    protected_branches     = false
+    custom_branch_policies = true
   }
+}
+
+// "main" exactly, rather than "any protected branch": protecting another
+// branch later must not silently extend who can reach the credential.
+resource "github_repository_environment_deployment_policy" "main_only" {
+  for_each = {
+    plan       = github_repository_environment.plan.environment
+    production = github_repository_environment.production.environment
+  }
+
+  repository     = data.github_repository.governance.name
+  environment    = each.value
+  branch_pattern = "main"
 }

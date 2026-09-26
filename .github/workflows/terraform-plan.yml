@@ -1,204 +1,143 @@
 name: terraform-plan
 
-# No `paths:` filter, deliberately. `plan` is a required status check, and a
-# required check that never reports leaves the pull request stuck on
-# "Expected" forever. A filtered workflow does not report at all, so a
-# docs-only or bootstrap-only change could never be merged.
-on:
-  pull_request:
+# Plans every pull request automatically — no approval, and no pull request
+# code ever runs.
+#
+# pull_request_target runs THIS FILE AS IT IS ON MAIN, in a checkout of main.
+# The only thing taken from the pull request is its catalogue data (the
+# *.auto.tfvars files), fetched as plain file contents by
+# scripts/take-pr-catalogue.sh. Variable files cannot execute anything, and
+# everything that interprets them — the Terraform code, the scripts, this
+# workflow — comes from main. That is what makes it safe to give this job the
+# organisation-admin credential with nobody approving the run.
+#
+# A pull request that changes code is planned here with MAIN's code, which is
+# not what it will do once merged; the comment says so, and
+# terraform-plan-code.yml plans its own code after a reviewer approves.
+#
+# Never add a step that checks out, installs, builds or runs anything from the
+# pull request. That turns this workflow into a textbook "pwn request".
 
-# Least privilege: read the code, write a PR comment, mint an OIDC token.
-# No AWS keys are stored anywhere in GitHub.
+on:
+  pull_request_target:
+
 permissions:
   contents: read
-  pull-requests: write
-  id-token: write
+  pull-requests: write # the plan comment
+  statuses: write # the terraform-plan status on the pull request's head
+  id-token: write # OIDC to the read-only state role
 
-# A new push supersedes the previous plan. Cancelling also withdraws a run
-# still waiting for environment approval, so reviewers only approve the
-# latest commit.
 concurrency:
   group: terraform-plan-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 env:
-  TF_VERSION: "1.9.0"
   AWS_REGION: eu-central-1
 
 jobs:
   plan:
     name: plan
-    runs-on: ubuntu-latest
-    # No job-level `if:` for forks. GitHub counts a SKIPPED required check as
-    # passing, so skipping here would let a fork pull request satisfy `plan`
-    # without a plan ever running. The fork case is failed explicitly below
-    # instead.
+    runs-on: ubuntu-24.04
 
-    # THIS JOB RUNS UNTRUSTED CODE. For pull_request events GitHub executes
-    # the workflow definition from the PR head, so anyone who can push a
-    # branch can rewrite the steps below. Two controls contain that:
-    #
-    #   1. TF_GITHUB_TOKEN lives in this environment, not in repository
-    #      secrets, and the environment has required reviewers. A human
-    #      releases the credential per run, after looking at the diff.
-    #   2. AWS_PLAN_ROLE_ARN grants s3:GetObject only. Even with the
-    #      credential, this job cannot write or delete state.
+    # Main only, no reviewer (bootstrap/github.tf). The credential is
+    # reachable here because this definition can only come from main.
     environment: plan
 
-    defaults:
-      run:
-        working-directory: terraform
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
     steps:
+      # The required check is a commit status on the PR head, not this job's
+      # check run: pull_request_target runs against the base commit, and its
+      # check run is not guaranteed to attach to the head.
+      - name: Mark terraform-plan pending
+        run: >-
+          gh api "repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" --silent
+          -f state=pending -f context=terraform-plan
+          -f description="Planning this pull request's catalogue"
+          -f target_url="$RUN_URL"
+
+      # This job holds the org-admin credential. A fork's data is still only
+      # data, but there is no reason to spend that credential on strangers.
       - name: Reject fork pull requests
-        if: github.event.pull_request.head.repo.full_name != github.repository
+        if: env.HEAD_REPO != github.repository
         run: |
-          echo "::error::Fork pull requests cannot run terraform plan — forks receive no secrets."
-          echo "Re-open this change as a branch on the repository itself."
+          echo "::error::Fork pull requests are not planned. Push the branch to this repository instead."
           exit 1
 
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Take the pull request's catalogue data (and nothing else)
+        run: bash scripts/take-pr-catalogue.sh "$GITHUB_REPOSITORY" "$PR_NUMBER" "$HEAD_SHA"
+
+      - name: Read the pinned Terraform version
+        id: tf
+        run: echo "version=$(tr -d '[:space:]' < .terraform-version)" >> "$GITHUB_OUTPUT"
 
       - name: Configure AWS credentials (OIDC, read-only state)
-        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
         with:
-          terraform_version: ${{ env.TF_VERSION }}
+          terraform_version: ${{ steps.tf.outputs.version }}
           terraform_wrapper: false
 
-      # Whole repository, so bootstrap/ is held to the same standard.
-      - name: terraform fmt
-        id: fmt
-        run: terraform fmt -check -recursive -diff ..
-        continue-on-error: true
-
       - name: terraform init
-        run: terraform init -input=false
-
-      # bootstrap/ is applied by hand (see README), so CI cannot plan it — but
-      # it can still catch a change that would not even validate.
-      - name: terraform validate
-        id: validate
-        continue-on-error: true
-        run: |
-          terraform validate -no-color
-          terraform -chdir=../bootstrap init -backend=false -input=false >/dev/null
-          terraform -chdir=../bootstrap validate -no-color
+        working-directory: terraform
+        run: terraform init -input=false -no-color
 
       - name: terraform plan
-        id: plan
+        id: report
+        working-directory: terraform
         env:
           GITHUB_TOKEN: ${{ secrets.TF_GITHUB_TOKEN }}
-        # -lock=false: a plan needs no lock, and taking one would block a
-        # concurrent apply for no benefit.
-        if: steps.validate.outcome == 'success'
         run: |
-          set +e
-          terraform plan -no-color -input=false -lock=false -out=tfplan 2>&1 | tee plan.txt
-          echo "exitcode=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
-
-          # Governance checks are warnings and do not move the exit code, so
-          # list them explicitly for the reviewer instead of leaving them
-          # buried in the plan output.
-          : > failed_checks.txt
-          if [ -f tfplan ]; then
-            terraform show -json tfplan \
-              | jq -r '.checks[]? | select(.status == "fail") | .address.to_display' \
-              > failed_checks.txt
+          if [ -s ../code_changes.txt ]; then
+            # shellcheck disable=SC2016 # the backticks are Markdown, not shell
+            files=$(sed 's/.*/`&`/' ../code_changes.txt | paste -sd, - | sed 's/,/, /g')
+            export REPORT_NOTE="⚠️ **This pull request also changes code:** $files. The plan above runs **main's** code against this pull request's catalogue, so it does not show what the code change will do. \`terraform-plan-code\` plans the pull request's own code once a platform engineer approves the run."
           fi
+          bash ../scripts/plan-report.sh "### Terraform plan — catalogue" report.md
 
-      # Advisory here: this job runs pull request code, which could edit the
-      # script. The enforcing copy runs in terraform-apply.yml, from main.
-      - name: plan guard
-        id: guard
-        if: steps.plan.outputs.exitcode == '0'
-        continue-on-error: true
-        run: bash ../scripts/plan-guard.sh tfplan 2>&1 | tee guard.txt; exit "${PIPESTATUS[0]}"
-
-      - name: Comment plan on PR
-        if: always() && steps.fmt.outcome != 'skipped'
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+      - name: Comment the plan on the pull request
+        if: ${{ !cancelled() && hashFiles('terraform/report.md') != '' }}
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
-          FMT: ${{ steps.fmt.outcome }}
-          VALIDATE: ${{ steps.validate.outcome }}
-          PLAN_EXIT: ${{ steps.plan.outputs.exitcode }}
-          GUARD: ${{ steps.guard.outcome }}
+          REPORT: terraform/report.md
         with:
           script: |
             const fs = require('fs');
-            const read = (f) => fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : '';
-            let plan = read('terraform/plan.txt') || 'Plan did not run — see fmt/validate above and the workflow log.';
-            const failedChecks = read('terraform/failed_checks.txt').trim().split('\n').filter(Boolean);
-            const planResult = { '0': 'success', '': 'skipped' }[process.env.PLAN_EXIT ?? ''] ?? 'failure';
-            const guardErrors = read('terraform/guard.txt').split('\n')
-              .filter(l => l.startsWith('::error'))
-              .map(l => '> ' + l.replace(/^::error[^:]*::/, ''));
-
-            // GitHub rejects comments over 65536 chars.
-            const LIMIT = 60000;
-            if (plan.length > LIMIT) {
-              plan = plan.slice(0, LIMIT) + '\n\n...truncated, see the workflow log.';
-            }
-
-            const body = [
-              '### Terraform plan',
-              '',
-              `| check | result |`,
-              `| --- | --- |`,
-              `| fmt | ${process.env.FMT} |`,
-              `| validate | ${process.env.VALIDATE} |`,
-              `| plan | ${planResult} |`,
-              `| destroy guard | ${process.env.GUARD || 'skipped'} |`,
-              `| governance checks | ${failedChecks.length ? '⚠️ ' + failedChecks.join(', ') : 'all pass'} |`,
-              '',
-              ...(guardErrors.length ? ['**Destroy guard refused this plan:**', '', ...guardErrors, ''] : []),
-              '<details><summary>Show plan</summary>',
-              '',
-              '```terraform',
-              plan,
-              '```',
-              '',
-              '</details>',
-              '',
-              '_Governance checks warn without failing this job — an orphan elsewhere in the org should not block your change. Messages are in the plan output. See docs/OPERATIONS.md._',
-            ].join('\n');
-
-            const marker = '### Terraform plan';
-            const comments = await github.paginate(github.rest.issues.listComments, {
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-            });
-            const existing = comments.find(
-              c => c.user.type === 'Bot' && c.body.startsWith(marker)
-            );
-
+            const body = fs.readFileSync(process.env.REPORT, 'utf8');
+            const marker = body.split('\n')[0];
+            const issue_number = Number(process.env.PR_NUMBER);
+            const { owner, repo } = context.repo;
+            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number });
+            const existing = comments.find(c => c.user.type === 'Bot' && c.body.startsWith(marker));
             if (existing) {
-              await github.rest.issues.updateComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                comment_id: existing.id,
-                body,
-              });
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
             } else {
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.issue.number,
-                body,
-              });
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
             }
 
-      - name: Fail if fmt, validate, plan or guard failed
-        if: >-
-          steps.fmt.outcome == 'failure' || steps.validate.outcome == 'failure' ||
-          steps.plan.outputs.exitcode != '0' || steps.guard.outcome == 'failure'
+      - name: Report terraform-plan result
+        if: ${{ !cancelled() }}
         env:
-          RESULT: fmt=${{ steps.fmt.outcome }} validate=${{ steps.validate.outcome }} plan_exit=${{ steps.plan.outputs.exitcode }} guard=${{ steps.guard.outcome }}
+          OUTCOME: ${{ steps.report.outcome }}
         run: |
-          echo "$RESULT"
-          exit 1
+          if [ "$OUTCOME" = success ]; then
+            state=success; description="Plan and destroy guard passed"
+          else
+            state=failure; description="Plan, guard or setup failed — see the comment or the log"
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" --silent \
+            -f state="$state" -f context=terraform-plan \
+            -f description="$description" -f target_url="$RUN_URL"

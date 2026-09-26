@@ -6,7 +6,8 @@ on:
     paths:
       - "terraform/**"
       - "scripts/**"
-      - ".github/workflows/terraform-*.yml"
+      - ".terraform-version"
+      - ".github/workflows/terraform-apply.yml"
   # Manual trigger for re-running a failed apply without an empty commit.
   workflow_dispatch:
 
@@ -21,17 +22,16 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  TF_VERSION: "1.9.0"
   AWS_REGION: eu-central-1
 
 jobs:
   apply:
     name: apply
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     # Runs code already merged to main, so it is trusted. The environment
-    # pins the credential to protected branches rather than gating on a
-    # reviewer — the pull request that merged the change was the gate.
+    # admits main only rather than gating on a reviewer — the pull request
+    # that merged the change was the gate.
     environment: production
 
     defaults:
@@ -39,27 +39,33 @@ jobs:
         working-directory: terraform
 
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read the pinned Terraform version
+        id: tf
+        run: echo "version=$(tr -d '[:space:]' < ../.terraform-version)" >> "$GITHUB_OUTPUT"
 
       - name: Configure AWS credentials (OIDC, read-write state)
-        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: ${{ vars.AWS_APPLY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
         with:
-          terraform_version: ${{ env.TF_VERSION }}
+          terraform_version: ${{ steps.tf.outputs.version }}
           terraform_wrapper: false
 
       - name: terraform init
-        run: terraform init -input=false
+        run: terraform init -input=false -no-color
 
-      # The plan is recomputed here from trusted code rather than reusing the
-      # one posted on the pull request. That is deliberate: the PR plan was
-      # produced by a job running untrusted pull request code, and applying
-      # an artifact it produced would hand that code a path to the apply
-      # credential. The PR plan is a preview; this is the plan of record.
+      # The plan is recomputed here rather than reusing one from the pull
+      # request. Both pull request plans are previews: the automatic one ran
+      # against main as it was when the PR was last pushed, and the code plan
+      # ran the pull request's own code — an artifact from that job must
+      # never reach the apply credential. This is the plan of record.
       #
       # Saving it and applying the saved file means the log below shows
       # exactly what was applied — nothing is re-planned between the two.

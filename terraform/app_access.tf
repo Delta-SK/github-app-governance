@@ -66,8 +66,8 @@ resource "github_app_installation_repositories" "this" {
     // can only fail on the pull request that introduces the date, so blocking
     // costs nobody else anything.
     precondition {
-      condition     = timecmp("${each.value.review_by}T00:00:00Z", timeadd(plantimestamp(), "${var.max_review_days * 24}h")) <= 0
-      error_message = "App '${each.key}' has review_by ${each.value.review_by}, more than ${var.max_review_days} days away. Reviews are at least annual; pick an earlier date."
+      condition     = timecmp("${each.value.review_by}T00:00:00Z", timeadd(plantimestamp(), "${local.max_review_days * 24}h")) <= 0
+      error_message = "App '${each.key}' has review_by ${each.value.review_by}, more than ${local.max_review_days} days away. Reviews are at least annual; pick an earlier date."
     }
   }
 }

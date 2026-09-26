@@ -1,0 +1,42 @@
+# Keeps every pinned dependency current, so pinning never turns into rot.
+#
+# - GitHub Actions are pinned to full commit SHAs with the version in a
+#   trailing comment; Dependabot updates both.
+# - Terraform providers are pinned by the committed lock files; Dependabot
+#   updates the constraint and the lock file together.
+# - cooldown: a release must be a week old before it is proposed, so a
+#   compromised release that is yanked within days never reaches a PR.
+#
+# Not covered by Dependabot, and bumped by hand (docs/OPERATIONS.md,
+# "Monthly"): the Terraform CLI in /.terraform-version, and the runner image
+# (`runs-on: ubuntu-24.04`) in the workflows.
+
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    groups:
+      github-actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: ci
+
+  - package-ecosystem: terraform
+    directories:
+      - /terraform
+      - /bootstrap
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    groups:
+      terraform-providers:
+        patterns: ["*"]
+    commit-message:
+      prefix: deps

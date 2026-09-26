@@ -1,0 +1,111 @@
+name: terraform-plan-code
+
+# Plans a pull request's OWN code, for the rare pull requests that change
+# Terraform code, scripts, workflows or the Terraform version. The automatic
+# terraform-plan.yml cannot show those: it deliberately runs main's code.
+#
+# This is the one place a human must approve a run. For pull_request events
+# GitHub runs the workflow definition from the pull request itself, so this
+# job — and anything it calls — is whatever the pull request says it is,
+# holding the organisation-admin credential. The `plan-code` environment
+# requires a platform-engineering reviewer to release it: read the diff,
+# especially under .github/ and scripts/, before approving.
+#
+# Advisory, not a required check: the pull request can rewrite this file, so
+# its result is evidence for the reviewer, not a gate. The gates are CODEOWNER
+# review, and the plan of record plus destroy guard in terraform-apply.yml,
+# which run from main after merge.
+
+on:
+  pull_request:
+    paths:
+      - "terraform/**"
+      - "!terraform/*.tfvars"
+      - "!terraform/*.tfvars.json"
+      - ".terraform-version"
+      - "scripts/**"
+      - ".github/workflows/**"
+
+permissions:
+  contents: read
+  pull-requests: write # the plan comment
+  id-token: write # OIDC to the read-only state role
+
+concurrency:
+  group: terraform-plan-code-${{ github.event.pull_request.number }}
+  cancel-in-progress: true # also withdraws a run still waiting for approval
+
+env:
+  AWS_REGION: eu-central-1
+
+jobs:
+  plan-code:
+    name: plan-code
+    runs-on: ubuntu-24.04
+
+    # Dependabot's runs receive no environment secrets, so this could only
+    # fail. Its version bumps are reviewed as diffs, validated, and planned
+    # again on main by terraform-apply.yml before anything is applied.
+    if: github.actor != 'dependabot[bot]'
+
+    environment: plan-code
+
+    env:
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+
+    steps:
+      - name: Reject fork pull requests
+        if: env.HEAD_REPO != github.repository
+        run: |
+          echo "::error::Fork pull requests cannot run a code plan — forks receive no secrets."
+          exit 1
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read the pinned Terraform version
+        id: tf
+        run: echo "version=$(tr -d '[:space:]' < .terraform-version)" >> "$GITHUB_OUTPUT"
+
+      - name: Configure AWS credentials (OIDC, read-only state)
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ steps.tf.outputs.version }}
+          terraform_wrapper: false
+
+      - name: terraform init
+        working-directory: terraform
+        run: terraform init -input=false -no-color
+
+      - name: terraform plan
+        working-directory: terraform
+        env:
+          GITHUB_TOKEN: ${{ secrets.TF_GITHUB_TOKEN }}
+        run: bash ../scripts/plan-report.sh "### Terraform plan — this pull request's code" report.md
+
+      - name: Comment the plan on the pull request
+        if: ${{ !cancelled() && hashFiles('terraform/report.md') != '' }}
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          REPORT: terraform/report.md
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync(process.env.REPORT, 'utf8');
+            const marker = body.split('\n')[0];
+            const issue_number = Number(process.env.PR_NUMBER);
+            const { owner, repo } = context.repo;
+            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number });
+            const existing = comments.find(c => c.user.type === 'Bot' && c.body.startsWith(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }

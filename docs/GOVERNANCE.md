@@ -346,7 +346,7 @@ Scope and permission are separate axes and only one of them is code here.
 | API rate limits | The installations read is one call; per-app resources are not. Paginate, back off, and split state before this bites |
 | Blast radius of a bad apply | Per-team state means a mistake affects one team |
 | Signal fatigue | Orphan and expiry findings need SLAs and routing, not a wall of warnings. One issue per team rather than one per org |
-| Plan approvals | One named approver per plan run does not scale; the `plan` environment's reviewers become the platform team, with self-review prevented |
+| Plan approvals | Already solved for the common case: catalogue pull requests plan automatically, because the plan runs main's code on the pull request's data. Only code changes wait for a platform-engineering approval — with self-review prevented once the team has more than one member |
 | Credential | One human-owned `admin:org` PAT becomes a machine user's, in a secrets manager with rotation. The user-to-server API leaves no weaker option (README, *Authentication*) |
 | Audit evidence | Git history *is* the audit trail: who approved what access, when, and why — plus the plan of record in each apply log |
 

@@ -9,6 +9,10 @@
 # the controls.
 /bootstrap/               @Delta-SK/platform-engineering
 
+# The destroy guard and the repository-controls check run from here, and the
+# apply job trusts them. Editing them is editing a control.
+/scripts/                 @Delta-SK/platform-engineering
+
 # CI is what enforces the GitOps flow. A change here can disable every other
 # control in this repository, including the plan that would have shown it.
 /.github/                 @Delta-SK/platform-engineering

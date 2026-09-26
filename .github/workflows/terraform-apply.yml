@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - "terraform/**"
+      - "scripts/**"
       - ".github/workflows/terraform-*.yml"
   # Manual trigger for re-running a failed apply without an empty commit.
   workflow_dispatch:
@@ -54,10 +55,28 @@ jobs:
       - name: terraform init
         run: terraform init -input=false
 
+      # The plan is recomputed here from trusted code rather than reusing the
+      # one posted on the pull request. That is deliberate: the PR plan was
+      # produced by a job running untrusted pull request code, and applying
+      # an artifact it produced would hand that code a path to the apply
+      # credential. The PR plan is a preview; this is the plan of record.
+      #
+      # Saving it and applying the saved file means the log below shows
+      # exactly what was applied — nothing is re-planned between the two.
+      - name: terraform plan (plan of record)
+        env:
+          GITHUB_TOKEN: ${{ secrets.TF_GITHUB_TOKEN }}
+        run: terraform plan -no-color -input=false -out=tfplan
+
+      # The enforcing copy of the guard. Runs from main, so a pull request
+      # cannot have edited it.
+      - name: plan guard
+        run: bash ../scripts/plan-guard.sh tfplan
+
       - name: terraform apply
         env:
           GITHUB_TOKEN: ${{ secrets.TF_GITHUB_TOKEN }}
-        run: terraform apply -auto-approve -input=false
+        run: terraform apply -no-color -input=false tfplan
 
       - name: Show resulting access matrix
         env:

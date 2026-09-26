@@ -60,10 +60,13 @@ constraint here. Individual ownership decays silently the moment someone
 changes role; team ownership decays visibly, because the team still exists to
 be asked.
 
-**Enforcement.** `variables.tf` rejects an empty `owner` or a malformed
-`review_by` at plan time. CODEOWNERS routes catalogue changes to the platform
-team. The access change and its justification arrive in the same diff, so
-approving the access means approving the reason.
+**Enforcement.** `variables.tf` rejects an empty `owner`, `purpose` or
+`justification` and a malformed `review_by` at plan time. The
+`owners_are_real_teams` check compares every `owner` with the teams that
+actually exist in the org, so a team deleted in a reorg is flagged on the next
+plan instead of quietly leaving its apps unowned. CODEOWNERS routes catalogue
+changes to the platform team. The access change and its justification arrive
+in the same diff, so approving the access means approving the reason.
 
 ### At scale
 
@@ -87,8 +90,12 @@ The escalation ladder — increasing pressure, never a surprise:
 | `review_by` − 30 days | Warning surfaces on every plan | **Implemented** — `reviews_are_due_soon` in `checks.tf` |
 | `review_by` | Plan **fails**; no change to any app can be applied until the entry is reconciled | **Implemented** — resource precondition in `app_access.tf` |
 | weekly, regardless | Reconciler raises an issue naming the app and owner | **Implemented** — `reconcile.yml` |
-| `review_by` + 30 days | Automated PR narrowing the app to zero repositories | Designed, not implemented |
+| `review_by` + 30 days | Automated PR narrowing the app to the quarantine repository | Designed, not implemented |
 | PR merged or overridden | Owner either defends the access or it lapses | Follows from the above |
+
+A `review_by` date can be at most `max_review_days` (366) away — enforced by a
+precondition — so "renew once for ten years" is not available as a way out of
+review.
 
 Expiry is a **blocking** condition rather than a warning, and that choice is
 deliberate. A `check` block would let an expired app keep being applied
@@ -100,13 +107,20 @@ should block your own apply. An installation somebody else added should not
 block your unrelated change — that would teach people to route around the
 pipeline, which is worse than the orphan.
 
-The important inversion is at the bottom: **the default outcome is removal.**
-An owner who wants to keep access must act. In the common failure mode — the
-owning team no longer exists, or no longer cares — nobody acts, and the access
-correctly disappears.
+The important inversion is at the bottom of the ladder: **the default outcome
+should be removal.** An owner who wants to keep access must act; in the common
+failure mode — the owning team no longer exists, or no longer cares — nobody
+acts, and the access disappears.
 
-Without that inversion, expiry dates are decoration. With it, the org's
-attack surface shrinks by default and grows only deliberately.
+Be precise about how much of that is built. Today the default outcome of
+inaction is a **blocked pipeline and an open issue naming the owner** — the
+access itself stays until somebody opens the quarantine pull request. That is
+already far better than silence: nobody can change *any* app until the lapsed
+one is dealt with, so it cannot be ignored for long. Closing the gap — the
+reconciler opening the quarantine PR itself — is the next thing to build.
+
+Without the inversion, expiry dates are decoration. With it, the org's attack
+surface shrinks by default and grows only deliberately.
 
 Review cadence should follow risk, not a uniform calendar: an app with `write`
 on the payments repository deserves quarterly review; an app with `read` on a
@@ -129,13 +143,15 @@ Anything in reality but not in intent is an orphan. That is the entire
 detection mechanism, and it is implemented in `checks.tf`:
 
 ```hcl
-setsubtract(
-  toset([for i in ...live.installations : i.app_slug]),
-  toset(keys(var.app_catalogue))
-)
+orphans = setsubtract(local.installed_slugs, setunion(local.catalogued, local.tombstoned))
 ```
 
-Non-empty means somebody installed something outside the process.
+Non-empty means somebody installed something outside the process. Tombstoned
+apps are excluded because they get a more specific message of their own
+(§5). The reverse comparison matters too: a catalogued app that is no longer
+installed, or whose `installation_id` belongs to a different app, is flagged
+— the second one blocks, since Terraform would otherwise act on the wrong
+installation.
 
 It runs in two places, and it needs both:
 
@@ -146,6 +162,13 @@ It runs in two places, and it needs both:
   where an orphan survives longest. The scheduled run opens a GitHub issue and
   closes it automatically once the organisation matches the catalogue again.
 
+One trap here cost a real bug: a failing `check` block is a **warning**, and
+`terraform plan -detailed-exitcode` still exits 0. A reconciler keyed on the
+exit code never reports an orphan at all — and would close an open issue
+while the orphan is still installed. The reconciler therefore reads check
+results out of the saved plan (`terraform show -json` → `.checks[]`), which
+was verified against a plan with a failing check.
+
 ### Triage
 
 Detection gives you a name. Deciding what to do needs more:
@@ -153,7 +176,7 @@ Detection gives you a name. Deciding what to do needs more:
 | Question | Source |
 | --- | --- |
 | Who installed it, and when? | `GET /orgs/{org}/audit-log` (**Enterprise Cloud only**) |
-| Is it still being used? | Installation token request activity |
+| Is it still being used? | No direct signal: GitHub does not expose per-installation usage to org owners. On Enterprise Cloud the audit log attributes API activity to the integration; otherwise ask the vendor, check the app's webhook deliveries, and let the quarantine soak (§5) answer it empirically |
 | What could it reach? | `permissions` and `repository_selection` from the data source |
 | How much damage could it do? | Permissions × sensitivity of reachable repos |
 
@@ -163,8 +186,8 @@ unavailable and provenance may be genuinely unrecoverable.
 
 The triage split that matters:
 
-- **Forgotten and inactive** — no token activity in 90 days. Low risk, remove
-  on the standard path.
+- **Forgotten and inactive** — no activity you can find in 90 days. Low risk,
+  remove on the standard path.
 - **Forgotten but active** — something depends on it and nobody knows what.
   This is the dangerous quadrant. An unowned app with live write access is
   both a supply-chain risk *and* a latent outage if removed carelessly.
@@ -178,9 +201,19 @@ read-only apps on documentation repositories.
 ## 5. Safe decommissioning
 
 Removing an app is not one action. It is a staged descent where every early
-step is reversible and the irreversible step comes last.
+step is reversible and the irreversible step comes last. The order below is
+not a preference: it is dictated by how the provider behaves, which was read
+from its source (v6.13.0, `resource_github_app_installation_repositories.go`)
+rather than assumed:
 
-### Stage 1 — Narrow to the quarantine repository *(reversible: `git revert`)*
+| Provider operation | Behaviour | Consequence for the runbook |
+| --- | --- | --- |
+| update | adds new repositories, *then* removes old ones | Moving an app onto the quarantine repository is safe |
+| update to `[]` | skips every removal, reports success | Empty lists are rejected in `variables.tf` |
+| destroy | removes every repository **except one arbitrary one** | Release an app only once it reaches the quarantine repository alone — enforced by `scripts/plan-guard.sh` |
+| read of a missing installation | errors, failing every plan | Release from Terraform **before** uninstalling |
+
+### Stage 1 — Quarantine *(reversible: `git revert`)*
 
 ```hcl
 imgbot = {
@@ -198,68 +231,81 @@ returns within one apply.
 This is the key move: it converts an irreversible administrative action into a
 reversible code change, reviewed like any other.
 
-**Why a quarantine repository instead of an empty list.** GitHub refuses to
-remove an installation's last repository:
+**Why a quarantine repository instead of an empty list.** GitHub will not let
+an installation drop its last repository, and the provider responds to an
+empty list by silently skipping the removals — `terraform apply` reports
+success, nothing changes, and every later plan shows the same diff. This was
+found by testing and then confirmed in the provider source; an earlier draft
+of this runbook said "narrow to zero" and would not have worked.
 
-```
-422 Cannot remove the last repository from this installation.
-```
-
-The Terraform provider does not surface that error. `terraform apply` reports
-success, nothing actually changes, and every subsequent plan shows the same
-pending diff — a silent permanent drift loop rather than a clean failure. This
-was found by testing, not by reading; an earlier draft of this runbook said
-"narrow to zero" and would not have worked.
-
-`terraform/variables.tf` therefore rejects an empty list at plan time with a
-message pointing here, and `app-quarantine` exists so that "reaches nothing
-useful" is expressible at all.
-
-The `decommissioning = true` flag is what lets an **expired** app be removed.
-Without it the expiry precondition would block the change, forcing an owner to
-extend the review date of an app they are trying to delete — the control
-preventing the outcome it exists to encourage.
+**Why the `decommissioning` flag.** It lets an **expired** app be quarantined:
+without it, the expiry precondition would block the change, forcing an owner
+to extend the review date of an app they are trying to remove. It cannot be
+abused to keep access — a validation only accepts `decommissioning = true`
+together with the quarantine repository alone, and forbids any other app from
+using that repository. Decommissioning apps are also exempt from the review
+and suspension warnings, so following this runbook raises no alerts.
 
 ### Stage 2 — Soak *(7–14 days)*
 
-Watch for breakage and for token activity that should no longer exist. Activity
-during the soak means something still depends on the app and the dependency was
-undocumented — investigate before continuing.
+Watch for breakage and for anything that still expects the app. Breakage
+during the soak means something depended on the app and the dependency was
+undocumented — revert, find the owner, and restart the review.
 
 Two weeks covers most fortnightly and monthly batch jobs. Extend for anything
 with a quarterly cycle.
 
-### Stage 3 — Suspend *(reversible, UI or API)*
+### Stage 3 — Release and tombstone *(reversible: re-add the entry)*
 
-Suspending blocks the installation entirely, including any access path that
-repository scoping did not cover. Stronger than zero-repos, still reversible
-with one click.
+One pull request moves the entry from `catalogue.auto.tfvars` to
+`decommissioned.auto.tfvars`:
 
-### Stage 4 — Uninstall *(irreversible)*
-
+```hcl
+decommissioned_apps = {
+  imgbot = {
+    removed_on       = "2026-11-14"
+    owner_at_removal = "web-team"
+    reason           = "Replaced by image optimisation in the build pipeline."
+    ticket           = "PLAT-2291"
+  }
+}
 ```
-DELETE /app/installations/{installation_id}
-```
 
-Terraform cannot do this — it manages installation *scope*, never installation
-*existence*. A human or a separate script performs it.
+The plan shows the app's access resource being destroyed. Because the app
+reaches only the quarantine repository, the provider's destroy leaves exactly
+that repository in place — nothing real is touched. Had the app still reached
+real repositories, the guard would have refused the plan, both on the pull
+request and again in the apply job.
 
-Then: revoke any credentials the app issued, remove any webhooks it installed,
-and replace the catalogue entry with a tombstone.
+This must happen **while the app is still installed**. The provider cannot
+read an installation that no longer exists, and Terraform's `removed` block
+cannot target a single `for_each` instance, so an app uninstalled first would
+break every plan until someone edited state by hand.
+
+### Stage 4 — Suspend, then uninstall *(org settings UI)*
+
+Org **Settings → GitHub Apps → the app → Configure**. Suspend first if you
+want one more reversible step — suspension blocks the installation entirely,
+including anything repository scoping did not cover — then uninstall.
+
+Terraform cannot do this, and neither can a script run by an org owner: the
+REST endpoints for suspending and deleting an installation require the app's
+own credentials. It is a human action by design.
+
+Between stage 3 and stage 4 the `tombstones_are_uninstalled` check warns that
+the app is still installed. That warning is the reminder to finish; it clears
+itself once the app is gone. Afterwards: revoke any credentials the app issued
+and remove any webhooks it installed.
 
 ### Tombstones
 
-Do not delete the catalogue entry. Move it to `decommissioned/` with the
-removal date and reason:
-
-```hcl
-# Removed 2026-11-14. Replaced by native Dependabot.
-# Owner at removal: platform-engineering. Ticket: PLAT-2291.
-```
-
-Six months later someone will ask "did we ever use X, and why did we stop?"
-The tombstone answers it, and prevents the app being reinstalled by someone
-solving the same problem again.
+The tombstone is not a comment — it is data the checks read. Six months later
+someone will ask "did we ever use X, and why did we stop?", and
+`terraform output decommissioned_apps` answers it. More importantly, if
+somebody reinstalls a tombstoned app, the plan and the weekly reconciler say
+so **together with the reason it was removed**, instead of reporting a
+generic orphan. The org's earlier decision is surfaced at the moment someone
+is about to unknowingly reverse it.
 
 ---
 
@@ -280,7 +326,9 @@ The recurrence is prevented at the org settings level:
    *which repositories* an app reaches. *What it can do* there is fixed by the
    app's manifest and is not Terraform-manageable — so permission changes on an
    app version bump need catching at review time, and should be part of the
-   `review_by` cycle rather than assumed stable.
+   `review_by` cycle rather than assumed stable. The installations data source
+   already returns each installation's `permissions`; recording them in the
+   catalogue and flagging any widening is the natural next check.
 
 Point 4 is the honest gap in this design. Repository scoping bounds blast
 radius; it does not bound capability. An app with `contents: write` on one
@@ -294,12 +342,16 @@ Scope and permission are separate axes and only one of them is code here.
 | Concern | Response |
 | --- | --- |
 | Review bottleneck | Per-team catalogue files, per-team CODEOWNERS |
-| Plan time | Split state per team; plans stay proportional to one team's apps |
+| Plan time | Split state per team; plans stay proportional to one team's apps. App access already accepts repos managed elsewhere |
 | API rate limits | The installations read is one call; per-app resources are not. Paginate, back off, and split state before this bites |
 | Blast radius of a bad apply | Per-team state means a mistake affects one team |
-| Signal fatigue | Orphan and expiry findings need SLAs and routing, not a wall of warnings |
-| Audit evidence | Git history *is* the audit trail: who approved what access, when, and why |
+| Signal fatigue | Orphan and expiry findings need SLAs and routing, not a wall of warnings. One issue per team rather than one per org |
+| Plan approvals | One named approver per plan run does not scale; the `plan` environment's reviewers become the platform team, with self-review prevented |
+| Credential | One human-owned `admin:org` PAT becomes a machine user's, in a secrets manager with rotation. The user-to-server API leaves no weaker option (README, *Authentication*) |
+| Audit evidence | Git history *is* the audit trail: who approved what access, when, and why — plus the plan of record in each apply log |
 
 That last row is the real prize. "Show me every change to third-party access
 in the last year, with the approver" is a `git log` on one directory — not a
-ticket to the platform team and a week of screenshots.
+ticket to the platform team and a week of screenshots. It holds only while
+nobody bypasses branch protection; at scale `enforce_admins` goes on and the
+break-glass path becomes a documented, audited exception.

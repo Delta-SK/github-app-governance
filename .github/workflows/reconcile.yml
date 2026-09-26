@@ -2,7 +2,11 @@ name: reconcile
 
 # Detection cannot depend on somebody happening to open a pull request.
 # This runs the same governance checks on a schedule and raises an issue when
-# the organisation stops matching the catalogue.
+# the organisation stops matching the catalogue — or when the controls that
+# protect this repository have been weakened by hand.
+#
+# One issue, labelled `reconciliation`, is kept open while anything is wrong
+# and commented on each week; it closes itself once everything is clean.
 on:
   schedule:
     - cron: "0 7 * * 1" # Mondays 07:00 UTC
@@ -65,6 +69,7 @@ jobs:
           #
           # Read the check results out of the plan instead.
           FAILED=0
+          : > failed_checks.txt
           if [ -f tfplan ]; then
             FAILED=$(terraform show -json tfplan \
               | jq '[.checks[]? | select(.status == "fail")] | length')
@@ -75,40 +80,53 @@ jobs:
           echo "failed_checks=$FAILED" >> "$GITHUB_OUTPUT"
           echo "plan exit=$CODE, failed checks=$FAILED"
 
+      # bootstrap/ owns this repository's branch protection, environments and
+      # CODEOWNERS team, and is applied by hand with its own state so CI cannot
+      # rewrite them. The price is that no plan ever looks at them. This does.
+      - name: Verify this repository's own controls
+        id: controls
+        env:
+          GH_TOKEN: ${{ secrets.TF_GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set +e
+          bash ../scripts/verify-repo-controls.sh "$REPO" | tee controls.txt
+          echo "failed=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+
       - name: Raise or update reconciliation issue
-        if: steps.plan.outputs.exitcode != '0' || steps.plan.outputs.failed_checks != '0'
+        if: >-
+          steps.plan.outputs.exitcode != '0' || steps.plan.outputs.failed_checks != '0' ||
+          steps.controls.outputs.failed != '0'
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         env:
           EXITCODE: ${{ steps.plan.outputs.exitcode }}
-          FAILEDCHECKS: ${{ steps.plan.outputs.failed_checks }}
+          CONTROLS_FAILED: ${{ steps.controls.outputs.failed }}
         with:
           script: |
             const fs = require('fs');
-            let out = fs.readFileSync('terraform/reconcile.txt', 'utf8');
+            const read = (f) => fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : '';
+            let out = read('terraform/reconcile.txt');
             if (out.length > 50000) out = out.slice(0, 50000) + '\n...truncated.';
 
             const code = process.env.EXITCODE;
-            const failed = process.env.FAILEDCHECKS;
+            const failedChecks = read('terraform/failed_checks.txt').trim().split('\n').filter(Boolean);
+            const controls = read('terraform/controls.txt').trim();
+
+            // Every finding is listed, not just the first: an orphan and an
+            // expired app in the same week are two different owners' problems.
             // Governance checks are warnings, so they do NOT move the exit
-            // code. They are reported separately and are the only way an
-            // orphaned installation surfaces here.
-            let reason;
-            if (failed !== '0') {
-              reason = `${failed} governance check(s) failed — an undeclared installation, or an app scoped to all repositories.`;
-            } else if (code === '2') {
-              reason = 'The organisation no longer matches the catalogue (drift).';
-            } else {
-              reason = 'The plan failed. This includes an app past its review_by date, which is a blocking condition.';
-            }
+            // code — they are the only way an orphaned installation surfaces.
+            const findings = [];
+            if (code === '1') findings.push('**The plan failed.** Most often an app past its `review_by` date (a blocking condition) — the error names the app and its owner.');
+            if (code === '2') findings.push('**Drift:** GitHub no longer matches the catalogue — access was changed outside a pull request. Either codify the change in a pull request, or run `terraform-apply` manually to restore the catalogue\'s access.');
+            if (failedChecks.length) findings.push(`**Governance checks failed:** ${failedChecks.map(c => '`' + c + '`').join(', ')}. The messages in the plan output say what to do.`);
+            if (process.env.CONTROLS_FAILED !== '0') findings.push('**This repository\'s own controls were weakened:**\n\n' + controls + '\n\nRestore them by re-applying `bootstrap/`.');
 
             const title = 'Reconciliation: organisation does not match the catalogue';
             const body = [
-              `**${reason}**`,
+              ...findings.map(f => '- ' + f),
               '',
-              `Detected by the scheduled \`reconcile\` workflow (exit code ${code}).`,
-              '',
-              'Someone may have installed or reconfigured a GitHub App outside the pull request process,',
-              'or a catalogued app has reached its review date. See docs/GOVERNANCE.md.',
+              `Detected by the \`reconcile\` workflow (plan exit code ${code}). What to do for each finding: docs/OPERATIONS.md, "Triage a reconciliation issue".`,
               '',
               '<details><summary>Plan output</summary>',
               '',
@@ -144,7 +162,9 @@ jobs:
             }
 
       - name: Close the reconciliation issue when clean
-        if: steps.plan.outputs.exitcode == '0' && steps.plan.outputs.failed_checks == '0'
+        if: >-
+          steps.plan.outputs.exitcode == '0' && steps.plan.outputs.failed_checks == '0' &&
+          steps.controls.outputs.failed == '0'
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
           script: |
@@ -170,5 +190,7 @@ jobs:
             }
 
       - name: Fail the run when reconciliation found something
-        if: steps.plan.outputs.exitcode != '0' || steps.plan.outputs.failed_checks != '0'
+        if: >-
+          steps.plan.outputs.exitcode != '0' || steps.plan.outputs.failed_checks != '0' ||
+          steps.controls.outputs.failed != '0'
         run: exit 1

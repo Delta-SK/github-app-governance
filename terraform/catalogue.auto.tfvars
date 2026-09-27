@@ -82,7 +82,7 @@ app_catalogue = {
     owner           = "web-team"
     purpose         = "Temporary governance demonstration"
     justification   = "Test installation used to demonstrate controlled GitHub App onboarding."
-    review_by       = "2027-03-31"
+    review_by       = "2026-09-26"
 
     repositories = [
       "web-frontend",

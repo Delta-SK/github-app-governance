@@ -76,4 +76,31 @@ app_catalogue = {
       pull_requests = "write"
     }
   }
+
+  render = {
+    installation_id = "165414300"
+    owner           = "web-team"
+    purpose         = "Temporary governance demonstration"
+    justification   = "Test installation used to demonstrate controlled GitHub App onboarding."
+    review_by       = "2027-03-31"
+
+    repositories = [
+      "web-frontend",
+    ]
+
+    permissions = {
+      contents             = "read"
+      metadata             = "read"
+      actions              = "write"
+      checks               = "write"
+      deployments          = "write"
+      environments         = "write"
+      issues               = "write"
+      pull_requests        = "write"
+      repository_hooks     = "write"
+      statuses             = "write"
+      vulnerability_alerts = "read"
+      workflows            = "write"
+    }
+  }
 }

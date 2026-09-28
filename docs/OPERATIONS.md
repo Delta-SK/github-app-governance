@@ -295,7 +295,9 @@ The `reconcile` workflow runs at 07:00 UTC. Then:
 | `check.permissions_match_catalogue` | An app's live permissions differ from its approved `permissions` — usually an owner accepted an app update asking for more | Find who accepted it (org audit log on Enterprise; otherwise ask the owners). Then either a pull request recording the new permissions, with the reason, approved by the owning team — or quarantine the app |
 | `check.reviews_are_due_soon` | Reviews due within 30 days | Nudge the owning teams; nothing to fix yet |
 | `check.reviews_are_overdue` | Review date passed; access moves to quarantine on the date shown | Remind the owning team: renew, or let it lapse |
-| **This repository's own controls were weakened** | Someone changed the ruleset on `main`, an environment, secret scanning, private vulnerability reporting, secrets or CODEOWNERS in the UI — or a break-glass bypass was never removed | Re-apply bootstrap (see [Change bootstrap](#change-bootstrap-teams-reviewers-rules-on-main)); find out who and why |
+| **This repository's controls differ from `bootstrap/`** | Someone changed the ruleset, an environment, repository settings or the team in the UI. The issue lists the resources that differ | Find out who and why. Re-apply bootstrap to restore (see [Change bootstrap](#change-bootstrap-teams-reviewers-rules-on-main)), or codify the change in a pull request |
+| **Controls outside Terraform are missing** | An extra environment branch policy, `TF_GITHUB_TOKEN` in `plan-code`, a repository-level secret, private vulnerability reporting off, or a CODEOWNERS error | Undo it in the settings; for private vulnerability reporting, re-apply bootstrap |
+| **The drift check on `bootstrap/` could not run** | Usually an expired token, or the audit role missing a permission after a provider upgrade | Read the error in the issue; fix the token, or add the named action to `aws_iam_policy_document.audit_read` |
 
 #### Handle an orphan
 

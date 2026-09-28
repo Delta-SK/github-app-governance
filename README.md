@@ -47,7 +47,7 @@ terraform-apply.yml      plan of record -> guard -> apply that plan
 GitHub org: app installation repository access
 State: s3://delta-sk-tfstate-751569314116 (S3-native lock)
 
-reconcile.yml            weekly: plan + checks + repo controls
+reconcile.yml            weekly: plan + checks + bootstrap drift plan
                          -> opens / updates / closes one issue
 scorecard.yml            weekly + on push: OpenSSF Scorecard -> badge, Security tab
 codeql.yml               every PR + weekly: CodeQL on the workflows -> Security tab
@@ -66,7 +66,7 @@ codeql.yml               every PR + weekly: CodeQL on the workflows -> Security 
 | `scripts/take-pr-catalogue.sh` | Takes a pull request's catalogue files — and nothing else — for the automatic plan |
 | `scripts/plan-report.sh` | Plan, checks and guard, rendered as the pull request comment |
 | `scripts/plan-guard.sh` | Refuses plans that would release an un-quarantined app or delete a repository |
-| `scripts/verify-repo-controls.sh` | Checks this repository's own branch protection, environments, secrets, CODEOWNERS |
+| `scripts/verify-repo-controls.sh` | The few controls a plan of `bootstrap/` cannot see: secret placement, private reporting, CODEOWNERS, extra environment policies |
 | `bootstrap/` | State backend, OIDC roles, and this repository itself: its settings, ruleset, environments, reviewing team, labels. Applied by hand |
 | `.terraform-version` | The one exact Terraform version, for CI and for every engineer |
 | `.github/dependabot.yml` | Keeps pinned actions and providers current |
@@ -324,6 +324,7 @@ GitHub.
 | --- | --- | --- |
 | `github-app-governance-plan` | `:environment:plan`, `:environment:plan-code`, `:environment:production` | `s3:GetObject` on the main state key |
 | `github-app-governance-apply` | `:environment:production` | `s3:GetObject` + `s3:PutObject` on the main state key; get/put/delete on its `.tflock` lock object |
+| `github-app-governance-audit` | `:environment:production` | read `bootstrap.tfstate`; read-only metadata of the state bucket, the two roles above and the OIDC provider — the calls a bootstrap plan was observed making |
 
 Declaring `environment:` on a job **replaces** the `:pull_request` /
 `:ref:refs/heads/main` portion of the subject claim with
@@ -371,8 +372,9 @@ To see the claim your own repository issues, dispatch a workflow that prints
 | --- | --- | --- | --- |
 | `TF_GITHUB_TOKEN` | secret | **environment** `plan` and `production` — code on `main` only | classic PAT (`repo`, `admin:org`) |
 | `TF_GITHUB_READ_TOKEN` | secret | **environment** `plan-code` | fine-grained PAT, owner = the org: all repositories (metadata), organisation *Administration: read*, *Members: read* |
-| `AWS_PLAN_ROLE_ARN` | variable | repository | read-only state role |
-| `AWS_APPLY_ROLE_ARN` | variable | repository | read-write state role |
+| `AWS_PLAN_ROLE_ARN` | variable | repository, **set by bootstrap** | read-only state role |
+| `AWS_APPLY_ROLE_ARN` | variable | repository, **set by bootstrap** | read-write state role |
+| `AWS_AUDIT_ROLE_ARN` | variable | repository, **set by bootstrap** | read-only role for planning `bootstrap/` itself |
 
 `TF_GITHUB_TOKEN` cannot be called `GITHUB_TOKEN` — that name is reserved by
 Actions. The workflows map it into the `GITHUB_TOKEN` environment variable at
@@ -411,8 +413,9 @@ That moves bootstrap's own state into the bucket it just created, so no
 unbacked-up local state file is left behind. It is the one genuine
 chicken-and-egg step in the setup, and it only happens once.
 
-Copy the outputs into `terraform/versions.tf` (backend block) and into the
-repository variables `AWS_PLAN_ROLE_ARN` and `AWS_APPLY_ROLE_ARN`.
+Copy the bucket name into `terraform/versions.tf` (backend block). The role
+ARNs need no copying: bootstrap publishes them as the repository variables
+the workflows read.
 
 Both GitHub tokens are **environment** secrets — never repository secrets,
 which every job could read, including one a pull request rewrote. The admin
@@ -539,10 +542,11 @@ terraform show -json tfplan \
                                                     # empty = every check passes
 ```
 
-This repository's own controls (branch protection, environments, secrets,
-CODEOWNERS):
+This repository's own controls — drift in everything `bootstrap/` manages,
+then the few things a plan cannot see:
 
 ```bash
+cd ../bootstrap && terraform plan -lock=false -detailed-exitcode   # 0 = no drift
 GH_TOKEN=$GITHUB_TOKEN ../scripts/verify-repo-controls.sh Delta-SK/github-app-governance
 ```
 
@@ -581,8 +585,10 @@ issue by the weekly reconciler, but never blocks an unrelated change:
 | `reviews_have_lapsed` | Grace period over: the app's access **has been narrowed to the quarantine repository** in the plan, and the next apply enforces it |
 | `permissions_match_catalogue` | An installation whose live permissions differ from the approved `permissions` in its entry — typically an owner accepting an app update's request for more access in the UI |
 
-Weekly, `reconcile.yml` additionally runs `scripts/verify-repo-controls.sh`,
-which checks the controls `bootstrap/` put on *this* repository.
+Weekly, `reconcile.yml` also plans `bootstrap/` read-only, so any change to
+the controls on *this* repository — ruleset, environments, settings, team —
+is found by the same code that defines them. `scripts/verify-repo-controls.sh`
+covers only what that plan cannot see.
 
 The split is the point. **A defect introduced by the pull request blocks that
 pull request**, because the author can fix it. **Something that happened
@@ -632,7 +638,7 @@ them from the file.
 | `bootstrap/github.tf` | `description` of `github_repository.governance` | The governance repository must already exist (it is where this code lives); bootstrap adopts it with an `import` block. Enabling private vulnerability reporting needs `curl` and the token in `GITHUB_TOKEN` (or `gh auth login`) |
 | `bootstrap/main.tf` and `terraform/versions.tf` | `backend "s3"` `bucket`, `region` | Same values as above, in both files |
 | `.github/workflows/*.yml` | `AWS_REGION` | Must match the backend region |
-| Repository settings | variables `AWS_PLAN_ROLE_ARN`, `AWS_APPLY_ROLE_ARN`; secrets `TF_GITHUB_TOKEN` in `plan` and `production`, `TF_GITHUB_READ_TOKEN` in `plan-code` | Role ARNs are bootstrap outputs. Never repository-level secrets — see *Setup* step 1 |
+| Repository settings | secrets `TF_GITHUB_TOKEN` in `plan` and `production`, `TF_GITHUB_READ_TOKEN` in `plan-code` | Never repository-level secrets — see *Setup* step 1. The role-ARN variables are set by bootstrap |
 | `terraform/settings.tf` | `github_org` | A local, not a variable — see *The trust boundary* |
 | `terraform/catalogue.auto.tfvars` | `repositories`, every app's `owner` and `permissions` | See *Setup* step 3 |
 | `terraform/decommissioned.auto.tfvars` | tombstones | Start from `{}` |
@@ -722,10 +728,10 @@ releases an app from Terraform **before** it is uninstalled.
 
 **`bootstrap/` is not GitOps.** It is applied by hand, with administrator
 credentials, into its own state — deliberately, so the pipeline cannot rewrite
-the controls that constrain it. The cost is that no plan ever looks at it.
-The weekly reconciler compensates by *verifying* the resulting controls on
-this repository (`scripts/verify-repo-controls.sh`); it detects weakening but
-does not repair it.
+the controls that constrain it. The weekly reconciler plans it read-only
+(with a role that can read bootstrap's state and resources, and change
+nothing), so drift is *detected* weekly — but repaired only by a person
+re-applying it.
 
 **The test org is on the GitHub Free plan**, so the managed repositories are
 **public** — branch protection is unavailable on private repositories on Free.

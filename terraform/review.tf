@@ -1,15 +1,5 @@
-// Review status of every catalogued app, from its approved permissions and
-// the plan's clock (docs/GOVERNANCE.md §3):
-//
-//   due soon  review_by within review_warning_days      -> warning
-//   overdue   review_by passed, grace not yet over       -> warning
-//   lapsed    grace over                                 -> access is narrowed
-//                                                           to the quarantine
-//                                                           repository
-//
-// A lapse never fails a plan. It changes what the app may reach, the plan
-// shows it, and the next apply enforces it. Apps already being
-// decommissioned are outside this cycle.
+// Review tier and status per app; a lapsed review narrows access to the
+// quarantine repository instead of failing any plan (docs/decisions/0004).
 
 locals {
   now = plantimestamp()
@@ -35,8 +25,7 @@ locals {
     )
   }
 
-  // What each app may actually reach: its catalogue entry, unless its review
-  // has lapsed.
+  // What each app may reach: its entry, unless its review has lapsed.
   effective_repositories = {
     for slug, app in var.app_catalogue : slug =>
     local.review_status[slug] == "lapsed" ? [local.quarantine_repository] : app.repositories

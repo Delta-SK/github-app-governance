@@ -76,6 +76,7 @@ codeql.yml               every PR + weekly: CodeQL on the workflows -> Security 
 | `.markdownlint-cli2.jsonc` | Markdown rules for the docs, enforced in CI |
 | `docs/GOVERNANCE.md` | The operating model: ownership, review, expiry, orphans, decommissioning, scale |
 | `docs/OPERATIONS.md` | Step-by-step daily guide, for app owners and for the platform team |
+| `docs/decisions/` | Decision records: each design decision, its reasons and its costs, stated once |
 
 ### Why the catalogue is one file
 
@@ -112,273 +113,50 @@ CODEOWNERS routing review per team. The schema does not change.
 
 ## Authentication
 
-### Why a classic PAT, and not a GitHub App
-
-This is the most important design constraint in the project, and it is not
-obvious.
-
-`github_app_installation_repositories` calls these endpoints:
-
-```text
-GET    /user/installations/{installation_id}/repositories
-PUT    /user/installations/{installation_id}/repositories/{repository_id}
-DELETE /user/installations/{installation_id}/repositories/{repository_id}
-```
-
-These are **user-to-server** endpoints. A GitHub App installation token is a
-*server-to-server* credential and cannot call `/user/...` at all. Neither can
-the `GITHUB_TOKEN` that GitHub Actions injects automatically.
-
-So the usual best practice — authenticate Terraform as a GitHub App — **cannot
-drive the core resource of this project.** A classic PAT belonging to an org
-owner is the credential that works.
-
-One further trap, worth knowing before you debug it yourself: the sibling
-endpoint `GET /user/installations` (list *all* installations) **does** reject
-classic PATs with `403 "You must authenticate with an access token authorized
-to a GitHub App"`. It is easy to hit that, conclude PATs are unusable here, and
-go build an OAuth flow you do not need. The provider never calls that endpoint.
-The per-installation endpoints above accept classic PATs normally — verified
-against this org by `PUT` and `DELETE` returning `204`.
-
-### Fine-grained PATs do not work — tested
-
-The obvious way to shrink this credential is a fine-grained token scoped to one
-organisation. It does not work, and the failure is architectural rather than a
-permissions mistake. Tested against this org with `Administration: Read/Write`
-at both repository and organisation level:
-
-| Endpoint | Fine-grained PAT |
-| --- | --- |
-| `/orgs/{org}/installations` | **200** — the audit read works |
-| `/user/installations/{id}/repositories` (read) | **403** |
-| `/user/installations/{id}/repositories/{repo}` (write) | **403** |
-
-The rejection is `Resource not accessible by personal access token`, which is
-GitHub's generic signal that an endpoint has **no fine-grained support at
-all** — not that a permission is missing. No combination of toggles enables it.
-
-Note the split: the **audit** half of this project is reachable with a
-fine-grained token, the **enforcement** half is not. The CI uses exactly that
-split: plans of pull request *code* run with a read-only fine-grained token
-and `-refresh=false`, which skips the one API that needs the classic PAT (see
-*The trust boundary*).
-
-With GitHub App auth, fine-grained PATs and `GITHUB_TOKEN` all excluded, a
-classic PAT is the only credential that drives **this Terraform resource**.
-That is a constraint of the API the provider calls, and it is why the blast
-radius here is managed by *who owns the token* rather than by scoping it. It
-is **not** a constraint of GitHub as a whole — see the next section.
-
-### What this costs, and what it would cost at scale
-
-A human-owned PAT is the weak point of this design. It is long-lived, bound to
-one person, and carries `admin:org` across every org that person belongs to.
-
-**On GitHub Enterprise Cloud there is a better answer, and it is the
-production path.** Since July 2025 an enterprise can install its own GitHub
-App on the *enterprise* and give it one of two permissions:
-
-| Enterprise App permission | Can | Endpoints (`/enterprises/{e}/apps/organizations/{org}/installations/...`) |
-| --- | --- | --- |
-| *Enterprise organization installation repositories* (read/write) | Read and change which repositories any installation in any org can reach | `GET …/{id}/repositories`, `PATCH …/{id}/repositories/add`, `…/remove`, and switch between selected and all |
-| *Enterprise organization installations* (read/write) | Additionally install and **uninstall** apps in every org | `GET`/`POST …/installations`, `DELETE …/{id}` |
-
-That is server-to-server, scoped to exactly this job, owned by no person, and
-spans every organisation in the enterprise — one inventory call per org
-instead of one PAT per org. It also removes two limitations below: stage 4 of
-decommissioning (uninstall) becomes automatable, and orphans in *all* orgs
-become visible to one reconciler.
-
-What stops this repository from using it: the test organisation is on the
-Free plan, and `integrations/github` 6.13 has no resource for these endpoints
-(its installation resource calls the user-to-server API). At Delta the
-migration would be:
-
-1. Create an enterprise-owned GitHub App with only *Enterprise organization
-   installation repositories* (read/write); keep *installations* write for a
-   separate, rarely used decommissioning identity.
-2. Replace `github_app_installation_repositories` with a thin, tested adapter
-   over the `add`/`remove` endpoints — or contribute the resource upstream —
-   keeping the catalogue, checks, guard and workflows exactly as they are.
-3. Retire the classic PAT.
-
-Where Enterprise Cloud is not available, in order of preference:
-
-1. A dedicated **machine user** holding the PAT, with org-owner rights and
-   nothing else, credential in a secrets manager with enforced rotation.
-2. Scope the blast radius by running this from a dedicated org-admin identity
-   used for no other purpose.
-
-### The trust boundary
-
-The credential is an organisation-admin PAT, and GitHub offers nothing weaker
-that can read installation access (see *Fine-grained PATs do not work*). So
-the whole CI design comes down to one rule:
-
-> **The admin credential only ever meets code that is already on `main`.
-> Pull request *data* may reach it; pull request *code* gets a read-only
-> token and nothing more.**
-
-The obvious setup breaks that rule. For `pull_request` events GitHub runs the
-workflow definition from the *pull request head*: anyone who can push a branch
-can rewrite the plan job and have it do anything with the credential, the
-moment the pull request opens. The previous version of this repository closed
-that with a reviewer gate on every plan — safe, but every catalogue change
-then sat waiting for a human to click *approve* before anyone could see its
-plan.
-
-The current design separates **code** from **data** instead:
-
-| Workflow | Trigger | Runs whose code | On what data | Credential | Approval |
-| --- | --- | --- | --- | --- | --- |
-| `terraform-validate` | `pull_request` | the PR's | the PR's | **none** | no |
-| `terraform-plan` | `pull_request_target` | **main's** | the PR's `*.auto.tfvars` | yes | **no** |
-| `terraform-plan-code` | `pull_request`, code paths only | the PR's | the PR's | **read-only** token, `-refresh=false` | **no** |
-| `terraform-apply` | push to `main` | main's | main's | yes (write) | no — the PR was the gate |
-| `reconcile` | weekly | main's | main's | yes | no |
-| `scorecard` | weekly, push to `main` | main's (a third-party action) | main's | **none** — default token only | no |
-
-Why `terraform-plan` is safe without approval:
-
-- `pull_request_target` runs the workflow **as it is on `main`**, in a checkout
-  of `main`. A pull request cannot change what this job does.
-- The only thing it takes from the pull request is the catalogue files, as
-  plain file contents fetched by exact commit through the API
-  (`scripts/take-pr-catalogue.sh`). Variable-definition files are pure data —
-  HCL forbids function calls and references in them — so they cannot execute
-  anything. Symlinks are refused rather than followed.
-- The *rules* that judge the catalogue are locals in `terraform/settings.tf`,
-  not variables. A catalogue file therefore cannot lengthen the review limits
-  or point the plan at another organisation: Terraform ignores undeclared
-  variables with a warning. (Verified: a catalogue carrying such overrides
-  still fails the review-horizon precondition.)
-- Its environment, `plan`, admits `main` only, so the credential cannot be
-  reached by any other workflow definition.
-
-What it cannot do: show the effect of a pull request's **code** changes,
-because it deliberately runs `main`'s code. That is `terraform-plan-code`'s
-job, and it runs automatically too — so for every pull request the reviewer
-sees the diff *and* its plan before approving:
-
-- It runs the pull request's own code, so it gets only what the pull request
-  may safely hold: `TF_GITHUB_READ_TOKEN`, a fine-grained token with
-  organisation *Administration* and *Members* **read**, and the read-only
-  state role. The `plan-code` environment never contains the admin token; the
-  weekly controls check fails if it ever does.
-- That token cannot read an installation's repositories (the API accepts
-  only a classic PAT), so the plan runs with `-refresh=false`: it shows what
-  the code change does relative to the state of the last apply. Live drift is
-  shown by the catalogue plan, which refreshes, and the apply re-plans with
-  refresh before changing anything.
-- A malicious pull request can at most read what that token reads — the
-  organisation's app inventory and team list — and the state, which holds no
-  secrets.
-
-The result is a single human approval in the whole flow: the pull request
-review, made with the code, the catalogue plan and the code plan in front of
-the reviewer.
-
-Supporting controls:
-
-| Control | Effect |
-| --- | --- |
-| `TF_GITHUB_TOKEN` exists only as an **environment** secret | No job can read it implicitly; there are no repository-level secrets (`gh secret list` returns nothing) |
-| `plan` and `production` admit **`main` only**, admin bypass off | Protecting another branch later cannot silently widen who reaches the credential |
-| `plan-code` holds **only a read-only token** | Pull request code plans automatically without ever meeting the admin token; the weekly controls check fails if `TF_GITHUB_TOKEN` appears there |
-| `main` is a **ruleset with no bypass actors** | Owners included: no change lands without `validate`, `terraform-plan` and a code owner's approval of the latest push. Break-glass is a visible ruleset change |
-| **CodeQL** scans the workflows on every pull request | Catches the mistakes that would break this model — an untrusted checkout in `terraform-plan.yml`, expression injection into `run:` — before review |
-| **Secret scanning and push protection** on every repository | A token pasted into a commit is rejected at `git push`, not discovered later in public history |
-| Every plan assumes a **read-only** AWS role | Plans cannot write or delete state. Only apply, from `main`, can |
-| Actions pinned to **commit SHAs**, Dependabot keeps them current | A moved tag cannot swap the code that runs beside the credential |
-| CODEOWNERS on `.github/`, `scripts/`, `terraform/`, `bootstrap/`, `.terraform-version` | Every change to a control is reviewed by the platform team |
-
-**Required status checks are evidence, not a boundary.** `validate` runs the
-pull request's own workflow file, and a commit status such as
-`terraform-plan` can be posted by anyone with write access. They catch
-mistakes; they do not stop an attacker. The boundaries are the trust rule
-above, CODEOWNER review, and the apply job, which re-plans and re-runs the
-guard from `main`, where pull request code cannot reach.
-
-`terraform-plan` reports through a **commit status** named `terraform-plan`
-on the pull request's head commit, not through its job's check run:
-`pull_request_target` runs against the base commit, and its check run is not
-guaranteed to attach to the head, so it could never reliably satisfy a
-required check.
-
-**Apply does not reuse any pull request plan — deliberately.** The automatic
-plan ran against `main` as it was when the pull request was last pushed; the
-code plan ran pull request code, and nothing that job produced may reach the
-apply credential. The apply job computes a *plan of record* from `main`, logs
-it, runs the destroy guard on it, and applies exactly that saved plan. Branch
-protection requires branches to be up to date, so the plans differ only if the
-organisation drifted in between — and the plan of record, in the apply log,
-is what actually happened.
-
-### AWS
-
-GitHub Actions assumes one of two roles via **OIDC**. No AWS keys are stored in
-GitHub.
-
-| Role | Trusted subject | Permissions |
-| --- | --- | --- |
-| `github-app-governance-plan` | `:environment:plan`, `:environment:plan-code`, `:environment:production` | `s3:GetObject` on the main state key |
-| `github-app-governance-apply` | `:environment:production` | `s3:GetObject` + `s3:PutObject` on the main state key; get/put/delete on its `.tflock` lock object |
-| `github-app-governance-audit` | `:environment:production` | read `bootstrap.tfstate`; read-only metadata of the state bucket, the two roles above and the OIDC provider — the calls a bootstrap plan was observed making |
-
-Declaring `environment:` on a job **replaces** the `:pull_request` /
-`:ref:refs/heads/main` portion of the subject claim with
-`:environment:<name>`. Trust policies written against the ref-based form stop
-matching the moment a job moves into an environment — with the same opaque
-`Not authorized to perform sts:AssumeRoleWithWebIdentity` as the ID mismatch
-above. It is the better form regardless: the environment carries its own
-deployment-branch policy, so "which branches may assume this role" is
-enforced once, by the environment, rather than duplicated in IAM.
-
-The plan role also trusts `production` so the scheduled reconciler can read
-state; it still cannot write anything.
-
-Both roles are scoped to `github-app-governance/terraform.tfstate`
-specifically, **not** `bucket/*`. `bootstrap.tfstate` holds the OIDC roles,
-this repository's branch protection and the reviewing team — CI must not be
-able to rewrite the controls that constrain it. Neither role can delete
-state; the apply role can delete only its own lock object.
-
-**Locking is S3-native** (`use_lockfile = true`): the lock is a
-`terraform.tfstate.tflock` object written with a conditional put next to the
-state. It replaced a DynamoDB table, which Terraform has deprecated for this
-purpose. Plans run with `-lock=false`, so only apply ever takes the lock.
-
-**The OIDC subject claim is not the documented format.** GitHub issues it with
-immutable numeric IDs embedded:
-
-```text
-repo:Delta-SK@333749275/github-app-governance@1387485403:ref:refs/heads/main
-```
-
-not the `repo:OWNER/REPO:ref:...` shown in most published examples. A trust
-policy written in the older form fails with `Not authorized to perform
-sts:AssumeRoleWithWebIdentity` and no indication of why.
-
-This is a security feature, not an annoyance: pinning the IDs means a deleted
-and recreated organisation or repository of the same name does **not** inherit
-the trust policy. `bootstrap/variables.tf` therefore pins `github_org_id` and
-`github_repo_id`, with the lookup commands in a comment there.
-
-To see the claim your own repository issues, dispatch a workflow that prints
-`$ACTIONS_ID_TOKEN_REQUEST_URL`'s decoded payload — faster than guessing.
-
-| Name | Kind | Scope | Value |
+| Name | Kind | Where | What |
 | --- | --- | --- | --- |
-| `TF_GITHUB_TOKEN` | secret | **environment** `plan` and `production` — code on `main` only | classic PAT (`repo`, `admin:org`) |
-| `TF_GITHUB_READ_TOKEN` | secret | **environment** `plan-code` | fine-grained PAT, owner = the org: all repositories (metadata), organisation *Administration: read*, *Members: read* |
-| `AWS_PLAN_ROLE_ARN` | variable | repository, **set by bootstrap** | read-only state role |
-| `AWS_APPLY_ROLE_ARN` | variable | repository, **set by bootstrap** | read-write state role |
-| `AWS_AUDIT_ROLE_ARN` | variable | repository, **set by bootstrap** | read-only role for planning `bootstrap/` itself |
+| `TF_GITHUB_TOKEN` | secret | environments `plan`, `production` — code on `main` only | classic PAT, exactly `repo` + `admin:org` |
+| `TF_GITHUB_READ_TOKEN` | secret | environment `plan-code` | fine-grained PAT, owner = the org: all repositories, organisation *Administration* and *Members* read |
+| `AWS_PLAN_ROLE_ARN` | variable, set by bootstrap | repository | read-only access to the main state |
+| `AWS_APPLY_ROLE_ARN` | variable, set by bootstrap | repository | read-write access to the main state and its lock |
+| `AWS_AUDIT_ROLE_ARN` | variable, set by bootstrap | repository | read-only plan of `bootstrap/` |
 
-`TF_GITHUB_TOKEN` cannot be called `GITHUB_TOKEN` — that name is reserved by
-Actions. The workflows map it into the `GITHUB_TOKEN` environment variable at
-the step level, which is where the provider reads it from.
+No repository-level secrets exist, and no AWS keys: GitHub Actions assumes the
+AWS roles through OIDC.
+
+**Why a classic PAT.** The provider manages installation access through
+user-to-server endpoints that GitHub App tokens cannot call and fine-grained
+PATs are refused on (tested). A classic PAT is the only credential that works
+on this plan; on GitHub Enterprise Cloud an enterprise-owned App with the
+*organization installation repositories* permission replaces it, and is the
+production path. Details, test results and the migration:
+[decision 0001](docs/decisions/0001-classic-pat-for-installation-access.md).
+
+**The trust boundary.** The admin token only ever meets code that is already
+on `main`. Pull request *data* is planned with `main`'s code; pull request
+*code* is planned with the read-only token. Nothing needs a human to release a
+credential, so every pull request is planned before review:
+[decision 0002](docs/decisions/0002-plan-data-and-code-separately.md).
+
+**AWS roles.**
+
+| Role | Assumable from | Can |
+| --- | --- | --- |
+| `github-app-governance-plan` | environments `plan`, `plan-code`, `production` | read the main state |
+| `github-app-governance-apply` | environment `production` | read and write the main state; create and delete its lock object |
+| `github-app-governance-audit` | environment `production` | read `bootstrap.tfstate` and the metadata of bootstrap's AWS resources |
+
+No role can read or write bootstrap's state except the audit role's read, and
+none can delete state. Locking is S3-native (`use_lockfile`); plans never
+lock.
+
+The OIDC subject claim embeds immutable numeric IDs —
+`repo:Delta-SK@333749275/github-app-governance@1387485403:environment:<name>`
+— not the `repo:OWNER/REPO:...` form in most examples; a policy written in
+that form fails with an unexplained `Not authorized to perform
+sts:AssumeRoleWithWebIdentity`. Pinning the IDs (`bootstrap/variables.tf`)
+also means a deleted and recreated organisation or repository of the same
+name does not inherit the trust.
 
 ---
 
@@ -590,34 +368,24 @@ the controls on *this* repository — ruleset, environments, settings, team —
 is found by the same code that defines them. `scripts/verify-repo-controls.sh`
 covers only what that plan cannot see.
 
-The split is the point. **A defect introduced by the pull request blocks that
-pull request**, because the author can fix it. **Something that happened
-elsewhere in the org — an orphan, a deleted team — warns**, because halting
-everyone's work until it is resolved would just teach people to bypass the
-pipeline. **Expiry blocks nothing — it revokes.** Thirty days after
-`review_by`, an app that was not renewed is narrowed to the quarantine
-repository in every plan, and the next apply enforces it. So a review date
-still has teeth, but one team's lapse never turns another team's pull request
-red.
+The split is the point: **a defect the pull request introduces blocks that
+pull request**, because its author can fix it; **something that happened
+elsewhere warns**, because it must not stop unrelated work. Expiry follows the
+same rule — it revokes the lapsed app's access rather than blocking anyone
+([0004](docs/decisions/0004-expiry-revokes-instead-of-blocking.md)).
+Time-based conditions use `plantimestamp()`, so they are evaluated in the plan
+a reviewer sees, not only at apply.
 
-Time-based conditions use `plantimestamp()` rather than `timestamp()`: the
-latter is unknown at plan time, so the condition would only evaluate during
-apply — after review rather than during it.
-
-**How these were verified.** The live configuration plans clean against the
-test org with every check passing. Each blocking control and each warning was
-then exercised by planning against the same org with a deliberately broken
-catalogue (a `-var-file` override, plan only, Terraform 1.16.4): all
-fifteen cases — including one that tries to override policy settings and
-`github_org` from a catalogue file, and one whose approved permissions no
-longer match the installation — failed or warned with the expected message,
-and the guard was run against the resulting saved plans. The review model was
-then exercised the same way: due soon, overdue within the grace period
-(warning only), lapsed (the plan moves that app, and only that app, to
-quarantine), dates beyond the high and medium tier limits (blocked), and a
-new app that is not yet installed (blocked). Expiry blocking and the reconciler issue flow were exercised in
-CI (issue #3). To see the orphan path end to end, install any app without
-cataloguing it and run `gh workflow run reconcile.yml`.
+**How these were verified** (Terraform 1.16.4, against the test org, plan
+only): the live configuration plans clean with every check passing; then each
+control was triggered with a deliberately broken catalogue passed as a
+`-var-file` — policy overrides from a catalogue file, permission drift, the
+decommissioning loophole, early release (guard), a mistyped repository, a
+review due soon, overdue, lapsed (only that app moves to quarantine), beyond
+its tier limit, and a new app not yet installed. Each blocked or warned as
+designed. The reconciler's issue flow was exercised in CI (issue #3); to see
+the orphan path end to end, install any app without cataloguing it and run
+`gh workflow run reconcile.yml`.
 
 Full design in [docs/GOVERNANCE.md](docs/GOVERNANCE.md); what to do when each
 one fires is in [docs/OPERATIONS.md](docs/OPERATIONS.md).
@@ -684,124 +452,48 @@ is never committed; lock files always are.
 
 ## Limitations
 
-**Terraform cannot install, suspend or uninstall a GitHub App.** It manages
-only the repository scope of an installation that already exists. For an org
-owner, installing, suspending and uninstalling a third-party app are UI actions
-(org **Settings → GitHub Apps → Configure**); the app-level REST endpoints
-for suspend and uninstall require the app's *own* credentials (a JWT), which
-you do not hold for somebody else's app. On Enterprise Cloud, the enterprise
-installation API can uninstall (see *What this costs, and what it would cost
-at scale*); on the plan used here it is a human action. This shapes the
-decommissioning runbook: Terraform narrows access to the quarantine
-repository and then releases the app, a human removes the installation.
+Each links to the decision that explains it.
 
-**An app must be installed before its entry can be applied.** Terraform
-cannot install apps, so a new-app pull request stays red ("not installed")
-until an organisation owner installs the app, and is then re-run. If an app
-is uninstalled by hand while still catalogued, the provider cannot read its
-installation and every plan fails until the entry is removed — which is why
-the runbook releases an app before uninstalling it.
-
-**The access resource is authoritative.** Applying it removes any repository
-access not in the catalogue. That is the point, but the first apply against an
-existing org will revoke undeclared access — plan before applying to a live
-organisation.
-
-**An installation cannot be reduced to zero repositories.** GitHub forbids
-removing an installation's last repository, and the provider (v6.13.0 source,
-`resource_github_app_installation_repositories.go`) handles that by silently
-**skipping all removals** when the list is empty: `terraform apply` reports
-success, nothing changes, and every later plan shows the same pending diff
-forever. Its destroy is subtler still — it removes every repository **except
-one arbitrary one**.
-
-So: `variables.tf` rejects empty lists; the `app-quarantine` repository exists
-so revocation is expressible; the provider adds before it removes, so moving
-an app onto the quarantine repository is safe (also verified by applying it
-against this org and confirming the follow-up plan is clean); and `scripts/plan-guard.sh`
-refuses to release an app that is not already quarantined, because the
-arbitrary survivor could be `payments-api`. The provider also *errors* when
-reading an installation that no longer exists, which is why the runbook
-releases an app from Terraform **before** it is uninstalled.
-
-**A human-owned PAT is the root credential.** Discussed under *Authentication*.
-
-**`bootstrap/` is not GitOps.** It is applied by hand, with administrator
-credentials, into its own state — deliberately, so the pipeline cannot rewrite
-the controls that constrain it. The weekly reconciler plans it read-only
-(with a role that can read bootstrap's state and resources, and change
-nothing), so drift is *detected* weekly — but repaired only by a person
-re-applying it.
-
-**The test org is on the GitHub Free plan**, so the managed repositories are
-**public** — branch protection is unavailable on private repositories on Free.
-On a paid plan, set `visibility = "private"` in `repositories.tf`.
-
-**The second reviewer is a demonstration identity.** `main` requires an
-approving CODEOWNER review from someone other than the last pusher. In this
-test org the
-second member of `@Delta-SK/platform-engineering` is a dedicated reviewer
-account, `Approver777`: it exercises the mechanism end to end, but it is not
-independent judgement. In a real organisation it is a second engineer, and
-nothing in the configuration changes. Merges before this account existed
-(pull requests #1–#7) used the owner bypass and are visible as such in the
-history.
-
-**Code plans are not refreshed, and their token is readable by any branch.**
-`terraform-plan-code` runs with `-refresh=false`, because the read-only
-token cannot read installation repositories; it shows the code change against
-the state of the last apply, not against live GitHub. And because it runs pull
-request code without an approval, anyone who can push a branch can read
-`TF_GITHUB_READ_TOKEN` — the organisation's app inventory and team list, read
-only. Both are the price of showing every reviewer a plan without handing pull
-request code the admin token. A read-only GitHub App could replace the
-fine-grained token and remove the human owner, but not the exposure: pull
-request code controls the whole job, so it could read the App's private key
-just as it can read the token. Read-only is the real boundary either way.
-
-**`terraform-plan` is a `pull_request_target` workflow.** It is safe because
-it never runs pull request code — and it stays safe only while that remains
-true. A future edit that checks out and runs anything from the pull request
-would hand the admin credential to every branch. The file says so at the top,
-and CODEOWNERS routes every change to it to the platform team.
-
-**Some OpenSSF Scorecard checks cannot reach 10 here, knowingly.**
-*Branch-Protection* tops out at 8 with one required reviewer (9 needs two).
-*Code-Review* counts the last 30 changes, so it climbs only as reviewed pull
-requests replace the owner-bypass merges of #1–#7. *Maintained* scores
-nothing until the repository is 90 days old. *Fuzzing*, *Packaging*,
-*Signed-Releases*, *Contributors* and *CII-Best-Practices* are aimed at
-published libraries and are deliberately not pursued.
-
-**There is no standing bypass of the rules on `main`.** Branch protection is
-a repository ruleset with no bypass actors, so organisation owners are bound
-by it too — no push to `main` without a green plan and a second person's
-approval. The cost is break-glass: when CI itself is broken, an owner adds an
-`OrganizationAdmin` bypass actor to the ruleset in `bootstrap/`, applies,
-repairs, and removes it again. That is slower than clicking a bypass button,
-and deliberately so — every use is a visible change to the ruleset, and the
-weekly controls check reports a bypass actor until it is gone
-(docs/OPERATIONS.md, *Break-glass*).
-
-**Expiry depends on the clock, by design.** A plan on the day after an app's
-grace period ends shows that app moving to quarantine, with no commit in
-between. That is the point of an expiry date; it is visible in every plan
-comment and in the reconciler's issue, and it never fails a plan. The move
-happens at the next apply — a merge or a manual `terraform-apply` run — not
-on the stroke of midnight.
-
-**A quarantined app is not chased.** Once an app is quarantined — by a
-decommissioning pull request or by a lapsed review — nothing warns if it sits
-there indefinitely. The exposure is small, since it reaches one empty
-repository, but uninstalling it is still a human step.
-
-**One catalogue, one state.** The per-team split described in
-`docs/GOVERNANCE.md` is a design, not an implementation. At two apps it would
-be premature; the point at which it stops being premature is discussed there.
-App access is already decoupled from repository management: an app can
-reference repositories this configuration does not create, and a
-postcondition fails the plan — naming the repository — if one does not
-exist. The remaining coupling is one state file, not one resource graph.
+- **Terraform cannot install, suspend or uninstall an app** — only scope an
+  existing installation. A new-app pull request stays red until an owner
+  installs the app; uninstalling is the last, human step of decommissioning.
+  On Enterprise Cloud an enterprise App could do both
+  ([0001](docs/decisions/0001-classic-pat-for-installation-access.md),
+  [0003](docs/decisions/0003-decommission-through-quarantine.md)).
+- **The access resource is authoritative.** The first apply against an
+  existing organisation revokes all undeclared access — plan first.
+- **No installation can reach zero repositories.** Revoked access means
+  "reaches only `app-quarantine`"; an app uninstalled by hand while catalogued
+  breaks every plan until its entry is removed
+  ([0003](docs/decisions/0003-decommission-through-quarantine.md)).
+- **A human-owned classic PAT is the root credential**, and restricting
+  classic PATs by organisation policy would cut this pipeline off
+  ([0001](docs/decisions/0001-classic-pat-for-installation-access.md)).
+- **Code plans are not refreshed, and their read-only token is readable by
+  any branch**
+  ([0002](docs/decisions/0002-plan-data-and-code-separately.md)).
+- **Expiry depends on the clock.** The day a grace period ends, plans show
+  that app moving to quarantine; the next apply enforces it
+  ([0004](docs/decisions/0004-expiry-revokes-instead-of-blocking.md)).
+- **Permissions are audited, not enforced.** A widened permission is reported
+  within a week, not prevented
+  ([0008](docs/decisions/0008-permissions-are-audited-not-enforced.md)).
+- **Bootstrap drift is detected weekly and repaired by a person**
+  ([0006](docs/decisions/0006-bootstrap-apart-and-drift-planned.md)).
+- **Break-glass is a ruleset change**, not a button; the second reviewer in
+  the test org is a demonstration identity
+  ([0005](docs/decisions/0005-rules-on-main-without-bypass.md)).
+- **A quarantined app is not chased.** Nothing warns if one sits in
+  quarantine indefinitely; it reaches only an empty repository.
+- **The test organisation is on the Free plan**, so the managed repositories
+  are public (rulesets need a paid plan for private repositories). On a paid
+  plan, set `visibility = "private"` in `repositories.tf`.
+- **Some OpenSSF Scorecard checks cannot reach 10 here.** Branch-Protection
+  tops out at 8 with one required reviewer; Code-Review rises as reviewed
+  merges replace #1–#7; Maintained scores after 90 days; checks aimed at
+  published libraries are not pursued.
+- **One catalogue, one state.** Splitting per team is designed
+  (docs/GOVERNANCE.md §8), not built; at three apps it would be premature.
 
 ---
 

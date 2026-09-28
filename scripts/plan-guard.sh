@@ -1,24 +1,9 @@
 #!/usr/bin/env bash
-# Refuse plans that would destroy something this pipeline must never destroy.
+# Refuse plans that release an app still reaching real repositories (the
+# provider would leave it on one arbitrary repository) or delete a repository.
+# docs/decisions/0003. Advisory in pull requests, enforcing in the apply job.
 #
 # Usage (from terraform/):  ../scripts/plan-guard.sh tfplan
-#
-# Terraform cannot express "you may not destroy X unless its prior state was
-# Y" — a precondition on a resource disappears together with the resource.
-# The saved plan can, because it records the before-state of every change.
-#
-# Guards:
-#   1. Releasing an app (removing it from the catalogue) destroys its
-#      github_app_installation_repositories resource. The provider then
-#      removes every repository EXCEPT ONE ARBITRARY ONE, because GitHub
-#      forbids removing the last. Unless the app is already narrowed to the
-#      quarantine repository, that silently leaves it on a random real
-#      repository. Quarantine first, release second.
-#   2. This pipeline never deletes repositories. The token lacks delete_repo,
-#      so the apply would fail halfway; refusing at plan time is clearer.
-#
-# Runs in the PR plan job (early feedback — that job runs untrusted code, so
-# it is advisory there) and in the apply job on main (the enforcing copy).
 
 set -euo pipefail
 

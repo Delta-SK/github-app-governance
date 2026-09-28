@@ -1,12 +1,8 @@
 name: reconcile
 
-# Detection cannot depend on somebody happening to open a pull request.
-# This runs the same governance checks on a schedule and raises an issue when
-# the organisation stops matching the catalogue — or when the controls that
-# protect this repository have been weakened by hand.
-#
-# One issue, labelled `reconciliation`, is kept open while anything is wrong
-# and commented on each week; it closes itself once everything is clean.
+# Weekly: the governance checks, pending changes, and drift in this
+# repository's own controls. One `reconciliation` issue stays open while
+# anything is wrong and closes itself when everything is clean.
 on:
   schedule:
     - cron: "0 7 * * 1" # Mondays 07:00 UTC
@@ -27,9 +23,7 @@ jobs:
       id-token: write
       issues: write
 
-    # Runs from main, so it is trusted code — but it only ever reads. It takes
-    # the production environment for the GitHub token and the read-only plan
-    # role for state, so a bug here cannot damage state.
+    # Trusted (main) but read-only: admin token, read-only AWS roles.
     environment: production
 
     defaults:
@@ -69,12 +63,8 @@ jobs:
           CODE=${PIPESTATUS[0]}
           echo "exitcode=$CODE" >> "$GITHUB_OUTPUT"
 
-          # A failing check block is only a WARNING: with no resource changes
-          # terraform still exits 0. Orphan detection lives in a check block,
-          # so the exit code alone would never report an undeclared app — the
-          # single most important thing this job exists to find.
-          #
-          # Read the check results out of the plan instead.
+          # Failing checks are warnings and leave the exit code at 0, so an
+          # orphan would never show in it: read them from the plan JSON.
           FAILED=0
           : > failed_checks.txt
           if [ -f tfplan ]; then
@@ -87,9 +77,7 @@ jobs:
           echo "failed_checks=$FAILED" >> "$GITHUB_OUTPUT"
           echo "plan exit=$CODE, failed checks=$FAILED"
 
-      # bootstrap/ defines this repository's own controls and is applied by
-      # hand, so CI cannot rewrite them. Planning it read-only finds any drift
-      # from the same code that defines them.
+      # Drift in bootstrap/, found by planning it (docs/decisions/0006).
       - name: Configure AWS credentials (OIDC, bootstrap audit)
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:

@@ -113,13 +113,12 @@ in the common failure mode — the owning team no longer exists, or no longer
 cares — nobody acts, and the access disappears. Without that inversion
 expiry dates are decoration.
 
-Why expiry revokes instead of blocking: an earlier version failed every plan
-once any app's date passed. At 500 apps on annual review that is about ten
-expiries a week — the pipeline would be blocked most of the time, and the
-predictable response is to rubber-stamp renewals just to unblock it. Revoking
-the lapsed app's access keeps the pressure on its owner, where it belongs,
-and leaves everyone else's work alone. It is the same model as access-review
-tooling that removes unreviewed access automatically.
+Expiry revokes instead of blocking: an earlier version failed every plan once
+any app's date passed, which at 500 apps would block the pipeline most of the
+time and invite rubber-stamped renewals. Revoking keeps the pressure on the
+lapsed app's owner and leaves everyone else's work alone — the model of
+access-review tooling that removes unreviewed access
+([decision 0004](decisions/0004-expiry-revokes-instead-of-blocking.md)).
 
 Renewal is a pull request like any other: it shows the app's current
 permissions and repositories next to the new date, and needs a code owner's
@@ -198,17 +197,10 @@ read-only apps on documentation repositories.
 ## 5. Safe decommissioning
 
 Removing an app is not one action. It is a staged descent where every early
-step is reversible and the irreversible step comes last. The order below is
-not a preference: it is dictated by how the provider behaves, which was read
-from its source (v6.13.0, `resource_github_app_installation_repositories.go`)
-rather than assumed:
-
-| Provider operation | Behaviour | Consequence for the runbook |
-| --- | --- | --- |
-| update | adds new repositories, *then* removes old ones | Moving an app onto the quarantine repository is safe |
-| update to `[]` | skips every removal, reports success | Empty lists are rejected in `variables.tf` |
-| destroy | removes every repository **except one arbitrary one** | Release an app only once it reaches the quarantine repository alone — enforced by `scripts/plan-guard.sh` |
-| read of a missing installation | errors, failing every plan | Release from Terraform **before** uninstalling |
+step is reversible and the irreversible step comes last. The order is dictated
+by how the provider behaves — read from its source, not assumed — and the
+destroy guard enforces it:
+[decision 0003](decisions/0003-decommission-through-quarantine.md).
 
 ### Stage 1 — Quarantine *(reversible: `git revert`)*
 
@@ -228,20 +220,10 @@ returns within one apply.
 This is the key move: it converts an irreversible administrative action into a
 reversible code change, reviewed like any other.
 
-**Why a quarantine repository instead of an empty list.** GitHub will not let
-an installation drop its last repository, and the provider responds to an
-empty list by silently skipping the removals — `terraform apply` reports
-success, nothing changes, and every later plan shows the same diff. This was
-found by testing and then confirmed in the provider source; an earlier draft
-of this runbook said "narrow to zero" and would not have worked.
-
-**Why the `decommissioning` flag.** It lets an **expired** app be quarantined:
-without it, the expiry precondition would block the change, forcing an owner
-to extend the review date of an app they are trying to remove. It cannot be
-abused to keep access — a validation only accepts `decommissioning = true`
-together with the quarantine repository alone, and forbids any other app from
-using that repository. Decommissioning apps are also exempt from the review
-and suspension warnings, so following this runbook raises no alerts.
+An installation cannot reach zero repositories, so "no access" means "reaches
+only the empty `app-quarantine`". The `decommissioning` flag takes the app out
+of the review cycle, so following this runbook raises no alerts; it is only
+accepted together with the quarantine repository alone.
 
 ### Stage 2 — Soak *(7–14 days)*
 
@@ -351,7 +333,26 @@ audited as code.
 
 ---
 
-## 7. What this looks like at 500 apps
+## 7. Scope: other routes to the same access
+
+This design governs **GitHub Apps**. Other credentials reach the same
+repositories; they are governed by organisation policy and by the corporate
+controls around it, not by this repository.
+
+| Route | Governed by | What the organisation should set |
+| --- | --- | --- |
+| **OAuth apps** | Organisation *third-party application access policy*: owners approve each OAuth app | Keep access restrictions on; review approved OAuth apps with the same cadence as GitHub Apps. No REST inventory exists, so this is a settings review, not a check |
+| **Fine-grained PATs** | Organisation PAT policy: require administrator approval | Require approval and a maximum lifetime. Listing and revoking them through the API needs a GitHub App — an Enterprise-path addition |
+| **Classic PATs** | Organisation PAT policy: allow or restrict | Restrict — once this pipeline no longer depends on one ([decision 0001](decisions/0001-classic-pat-for-installation-access.md)) |
+| **Deploy keys, SSH keys** | Corporate SSO and change ownership: every change has a named responsible person | Out of scope here by design |
+
+On Enterprise Cloud with SAML single sign-on, credential authorizations and
+the audit log make OAuth tokens and PATs inventoriable across the enterprise —
+the natural next step at Delta's scale.
+
+---
+
+## 8. What this looks like at 500 apps
 
 | Concern | Response |
 | --- | --- |

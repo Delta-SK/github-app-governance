@@ -16,10 +16,8 @@ variable "github_repo" {
   default     = "github-app-governance"
 }
 
-# GitHub embeds immutable numeric IDs in the OIDC subject claim:
-#   repo:<org>@<org_id>/<repo>@<repo_id>:ref:refs/heads/main
-# Pinning the IDs is what stops a deleted-and-recreated org or repository of
-# the same name from inheriting this trust policy. Find them with:
+# The OIDC subject claim embeds immutable IDs — repo:<org>@<org_id>/<repo>@<repo_id>
+# — so a recreated org or repository of the same name inherits no trust. Find them:
 #   curl -H "Authorization: Bearer $GITHUB_TOKEN" \
 #     https://api.github.com/orgs/<org> | jq .id
 #   curl -H "Authorization: Bearer $GITHUB_TOKEN" \

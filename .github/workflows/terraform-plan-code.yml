@@ -1,27 +1,8 @@
 name: terraform-plan-code
 
-# Plans a pull request's OWN code, for the rare pull requests that change
-# Terraform code, scripts, workflows or the Terraform version. The automatic
-# terraform-plan.yml cannot show those: it deliberately runs main's code.
-#
-# Runs automatically, so the reviewer sees the plan before approving. That is
-# safe only because of what this job does NOT hold. For pull_request events
-# GitHub runs the workflow definition from the pull request itself: this job
-# is whatever the pull request says it is. So it gets a read-only GitHub
-# token (TF_GITHUB_READ_TOKEN, fine-grained: organisation Administration and
-# Members read) and the read-only state role — never the organisation-admin
-# token, which the `plan-code` environment does not contain.
-#
-# The read-only token cannot read an installation's repositories (that API
-# accepts only a classic PAT), so the plan runs with -refresh=false: it shows
-# what this pull request's CODE changes, relative to the state of the last
-# apply. Live drift is in the automatic catalogue plan, which refreshes, and
-# the apply re-plans with refresh before touching anything.
-#
-# Advisory, not a required check: the pull request can rewrite this file, so
-# its result is evidence for the reviewer, not a gate. The gates are CODEOWNER
-# review, and the plan of record plus destroy guard in terraform-apply.yml,
-# which run from main after merge.
+# Plans a pull request's own code, when code changes, automatically — with
+# only the read-only token and -refresh=false (docs/decisions/0002). Advisory:
+# the pull request can rewrite this file, so its result is evidence, not a gate.
 
 on:
   pull_request:
@@ -52,9 +33,7 @@ jobs:
       pull-requests: write # the plan comment
       id-token: write # OIDC to the read-only state role
 
-    # Dependabot's runs receive no environment secrets, so this could only
-    # fail. Its version bumps are reviewed as diffs, validated, and planned
-    # again on main by terraform-apply.yml before anything is applied.
+    # Dependabot runs get no environment secrets; its bumps are planned on main.
     if: github.actor != 'dependabot[bot]'
 
     environment: plan-code

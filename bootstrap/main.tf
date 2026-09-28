@@ -13,13 +13,8 @@ terraform {
     }
   }
 
-  # Bootstrap creates the backend that everything else uses, so the first
-  # apply against a fresh account necessarily runs with local state. Once the
-  # bucket exists, bootstrap's own state is migrated into it with
-  # `terraform init -migrate-state`, which removes the unbacked-up local file.
-  #
-  # Against a brand new account, comment this block out for the first apply,
-  # then restore it and migrate. See README "Bootstrap the backend".
+  # On a fresh account: comment out for the first apply, then restore and
+  # `terraform init -migrate-state` (README, Setup step 1).
   backend "s3" {
     bucket       = "delta-sk-tfstate-751569314116"
     key          = "github-app-governance/bootstrap.tfstate"
@@ -46,7 +41,7 @@ resource "aws_s3_bucket" "state" {
   }
 }
 
-# Versioning and encryption do not stop a plaintext request. Refuse them.
+# Refuse plaintext requests.
 data "aws_iam_policy_document" "state_bucket" {
   statement {
     effect    = "Deny"
@@ -99,29 +94,18 @@ resource "aws_s3_bucket_public_access_block" "state" {
 # GitHub Actions OIDC federation — no long-lived AWS keys in GitHub secrets
 # ---------------------------------------------------------------------------
 
-# No thumbprint_list: AWS validates GitHub's OIDC endpoint against its own
-# trusted CA store and ignores the thumbprint. A pinned thumbprint is a value
-# that looks load-bearing, is not, and goes stale when GitHub rotates
-# certificates — exactly the drift this configuration avoids elsewhere.
+# No thumbprint_list: AWS ignores it for GitHub, and a pinned one goes stale.
 resource "aws_iam_openid_connect_provider" "github" {
   url            = "https://token.actions.githubusercontent.com"
   client_id_list = ["sts.amazonaws.com"]
 }
 
 locals {
-  # GitHub issues the subject claim as
-  #   repo:<org>@<org_id>/<repo>@<repo_id>:...
-  # Trust policies written in the documented repo:<org>/<repo>:... form
-  # silently fail to match. Pinning the numeric IDs also stops a deleted and
-  # recreated org or repo of the same name from inheriting this trust.
+  # GitHub's subject claim embeds immutable IDs; see variables.tf.
   subject_prefix = "repo:${var.github_org}@${var.github_org_id}/${var.github_repo}@${var.github_repo_id}"
 }
 
-# Two roles, split by what they may do to state.
-#
-# Every plan — automatic or approval-gated — reads state and runs with
-# -lock=false, so it needs read-only access to the state object and nothing
-# else. Only the apply job on main writes state and takes the lock.
+# Plans read state without locking; only apply, from main, writes it.
 
 data "aws_iam_policy_document" "assume_plan" {
   statement {
@@ -139,21 +123,8 @@ data "aws_iam_policy_document" "assume_plan" {
       values   = ["sts.amazonaws.com"]
     }
 
-    # Declaring `environment:` on a job REPLACES the :pull_request / :ref:...
-    # portion of the subject claim with :environment:<name>. A trust policy
-    # written against the ref-based claims stops matching the moment a job is
-    # moved into an environment.
-    #
-    # This is an improvement, not just a quirk: the environment carries its own
-    # deployment branch policy, so "which branches may assume this role" is
-    # enforced by the environment rather than duplicated in IAM.
-    #
-    # plan       -> main's code planning a PR's catalogue data (automatic)
-    # plan-code  -> a PR's own code, automatically (read-only GitHub token)
-    # production -> main only; the reconciler runs here and takes this
-    #               read-only role, which costs nothing.
-    #
-    # StringEquals, not StringLike: there are no wildcards to match.
+    # A job's `environment:` replaces the ref in the subject claim, so which
+    # refs may assume the role is decided by the environments' policies.
     condition {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
@@ -182,9 +153,7 @@ data "aws_iam_policy_document" "assume_apply" {
       values   = ["sts.amazonaws.com"]
     }
 
-    # Only the production environment, which only main may deploy to. Neither
-    # plan environment is here: nothing that runs on a pull request may reach
-    # a credential that can mutate state.
+    # Nothing that runs on a pull request may reach write access to state.
     condition {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
@@ -205,11 +174,7 @@ resource "aws_iam_role" "apply" {
   assume_role_policy = data.aws_iam_policy_document.assume_apply.json
 }
 
-# CI only ever touches the main configuration's state. Scoping to that exact
-# key keeps bootstrap.tfstate — which holds the OIDC roles, the branch
-# protection and the reviewing team — out of reach of the pipeline those
-# controls govern. Granting bucket/* would let a compromised apply rewrite the
-# controls that are supposed to constrain it.
+# Scoped to the main state key: bootstrap.tfstate stays out of CI's reach.
 locals {
   main_state_arn = "${aws_s3_bucket.state.arn}/github-app-governance/terraform.tfstate"
 }
@@ -245,18 +210,14 @@ data "aws_iam_policy_document" "state_write" {
     }
   }
 
-  # No s3:DeleteObject — Terraform never needs to delete its own state, and
-  # versioning means a destructive write is recoverable while a delete is
-  # one step closer to not being.
+  # No s3:DeleteObject on state: versioning makes a bad write recoverable.
   statement {
     effect    = "Allow"
     actions   = ["s3:GetObject", "s3:PutObject"]
     resources = [local.main_state_arn]
   }
 
-  # S3-native locking: the lock is an object next to the state, created with
-  # a conditional write and deleted on release. Delete is granted on the lock
-  # object only, never on the state.
+  # The S3-native lock object: created and deleted by apply.
   statement {
     effect    = "Allow"
     actions   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
@@ -277,11 +238,9 @@ resource "aws_iam_role_policy" "apply_state_write" {
 }
 
 # ---------------------------------------------------------------------------
-# Audit role: the weekly reconciler plans THIS configuration read-only, so
-# drift in the controls bootstrap defines is found by the code that defines
-# them. Main only (production environment); reads bootstrap state and the
-# metadata of the resources above, nothing else. The action list is what a
-# bootstrap plan was observed to call, from CloudTrail.
+# Audit role: read-only plan of this configuration by the weekly reconciler
+# (docs/decisions/0006). Actions are those a bootstrap plan was observed to
+# call in CloudTrail.
 # ---------------------------------------------------------------------------
 
 data "aws_iam_policy_document" "assume_audit" {

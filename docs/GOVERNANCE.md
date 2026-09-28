@@ -275,8 +275,8 @@ On **GitHub Enterprise Cloud** it need not be. An enterprise-owned GitHub App
 with *Enterprise organization installations* (write) can call
 `DELETE /enterprises/{e}/apps/organizations/{org}/installations/{id}` — so
 stage 4 can become the last step of an automated, still staged and still
-reviewed, decommissioning (README, *What this costs, and what it would cost
-at scale*).
+reviewed, decommissioning
+([decision 0001](decisions/0001-classic-pat-for-installation-access.md)).
 
 Between stage 3 and stage 4 the `tombstones_are_uninstalled` check warns that
 the app is still installed. That warning is the reminder to finish; it clears
@@ -362,7 +362,7 @@ the natural next step at Delta's scale.
 | Blast radius of a bad apply | Per-team state means a mistake affects one team |
 | Signal fatigue | Orphan and expiry findings need SLAs and routing, not a wall of warnings. One issue per team rather than one per org |
 | Plan approvals | None needed. Catalogue pull requests are planned by main's code with the admin token (data cannot execute); code pull requests by their own code with a read-only token. The only approval is the pull request review, made with both plans in view |
-| Credential | On Enterprise Cloud: an enterprise-owned GitHub App with only *Enterprise organization installation repositories* — no human token at all. Elsewhere: a machine user's PAT in a secrets manager with rotation (README, *Authentication*) |
+| Credential | On Enterprise Cloud: an enterprise-owned GitHub App with only *Enterprise organization installation repositories* — no human token at all. Elsewhere: a machine user's PAT in a secrets manager with rotation ([decision 0001](decisions/0001-classic-pat-for-installation-access.md)) |
 | Many organisations | The enterprise installations API lists every installation in every organisation of the enterprise: one reconciler, one inventory, orphans visible org-wide rather than per org |
 | Audit evidence | Git history *is* the audit trail: who approved what access, when, and why — plus the plan of record in each apply log |
 

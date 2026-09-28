@@ -20,10 +20,10 @@ Why the system exists and how it is designed: [README](../README.md) and
 | Term | Meaning |
 | --- | --- |
 | **Catalogue** | `terraform/catalogue.auto.tfvars`. The list of every app allowed in the org, who owns it, why, until when, and which repositories it may reach. If it is not in the catalogue, it is not allowed. |
-| **Installation** | An app installed on the org. Each has a numeric **installation ID**. |
+| **Installation** | An app installed on the org. Only an organisation owner can install one. |
 | **Slug** | The app's short name in URLs, e.g. `renovate`. Catalogue entries are keyed by slug. |
 | **Owner** | A GitHub **team** (never a person) that answers for the app. |
-| **`review_by`** | The date the access stops being assumed good. After it, every plan fails until the owner renews or removes the app. At most one year ahead. |
+| **`review_by`** | The date the access stops being assumed good. At most 90, 180 or 366 days ahead, depending on how much the app can do. If nobody renews it, 30 days later the app loses its access (it is moved to quarantine). |
 | **Plan** | Terraform's preview of what a change will do. Posted as a comment on every pull request. |
 | **Apply** | Terraform making the change for real. Runs automatically after merge to `main`. |
 | **Quarantine** | The empty repository `app-quarantine`. An app being removed is pointed here, so it can reach nothing real while still installed. |
@@ -70,33 +70,21 @@ means formatting or syntax: its log shows the exact line.
 
 ### Request a new app
 
-1. **Open a request.** Issues → New issue → **Request a GitHub App**. Fill in
-   every field. Be specific about repositories: "All repositories" is never
-   granted.
-2. **Wait for approval.** The platform team checks the vendor, the
-   permissions the app asks for, and your justification, and replies on the
-   issue.
-3. **An org owner installs it.** Once approved, a platform engineer installs
-   the app choosing **"Only select repositories"** and a single repository
-   from your list. From this moment until step 5 is merged, the app shows as
-   *undeclared* in plans — that is expected; keep the gap short.
-4. **Get the installation ID and permissions.** The platform engineer posts
-   both on the issue. (The ID is the number at the end of the app's Configure
-   page URL, `github.com/organizations/Delta-SK/settings/installations/<ID>`;
-   the permissions are listed on the same page.)
-5. **Open the catalogue pull request.** Add an entry under `app_catalogue`:
+The pull request **is** the request — there is no separate form.
+
+1. **Open a pull request** adding an entry under `app_catalogue`. Everything
+   in it is visible on the app's public page before anyone installs it:
 
    ```hcl
    stale = {
-     installation_id = "123456789"          # from step 4, in quotes
-     owner           = "web-team"           # an existing GitHub team
-     purpose         = "Closes inactive issues and pull requests"
-     justification   = "Keeps the backlog triaged without manual sweeps; replaces a cron script."
-     review_by       = "2027-06-30"         # at most one year from today
+     owner         = "web-team"          # an existing GitHub team
+     purpose       = "Closes inactive issues and pull requests"
+     justification = "Keeps the backlog triaged without manual sweeps; replaces a cron script."
+     review_by     = "2027-03-15"        # within the limit for its risk tier
      repositories = [
        "web-frontend",
      ]
-     permissions = {                         # exactly as posted in step 4
+     permissions = {                      # as listed on the app's install page
        issues        = "write"
        metadata      = "read"
        pull_requests = "write"
@@ -104,9 +92,21 @@ means formatting or syntax: its log shows the exact line.
    }
    ```
 
-   Link the request issue in the pull request. Follow
-   [How any change works](#how-any-change-works). When the apply finishes,
-   the app reaches exactly the listed repositories.
+   Be specific about repositories: "All repositories" is never granted. The
+   review limit depends on the permissions: 90 days if the app can write to
+   workflows, actions, administration, hooks, environments, secrets or
+   members; 180 days for any other write; 366 days for read-only.
+2. **The plan is red, on purpose:** *"App 'stale' is in the catalogue but not
+   installed"*. Nothing can merge before the app exists.
+3. **The platform team reviews the request** — vendor, permissions,
+   justification — and comments on the pull request.
+4. **If approved, an organisation owner installs the app**, choosing **"Only
+   select repositories"** and one repository from your list, then re-runs
+   the plan (Actions → `terraform-plan` → *Re-run*). It turns green and shows
+   the exact access; the permissions check confirms the installed
+   permissions match your entry.
+5. **Approval and merge** as in [How any change works](#how-any-change-works).
+   When the apply finishes, the app reaches exactly the listed repositories.
 
 ### Give an app access to another repository
 
@@ -139,15 +139,15 @@ Every plan starts warning 30 days before an app's `review_by` date:
    changed, every plan already says so (*"Installed permissions differ from
    the catalogue"*); decide whether the app still deserves them, and update
    its `permissions` in the same pull request, saying why.
-3. Set `review_by` to a new date — at most one year from today; sooner for
-   apps with write access to sensitive repositories.
+3. Set `review_by` to a new date within the app's tier limit — 90, 180 or
+   366 days; the plan comment's error names the tier if you go too far.
 4. Follow [How any change works](#how-any-change-works). In the pull request,
    write who confirmed the app is still needed.
 
-**If you miss the date,** every plan in the org fails with
-*"App '…' passed its review_by date"* — nobody can change any app until
-yours is renewed or quarantined. The weekly reconciliation issue will name
-your team.
+**If you miss the date,** nothing breaks for anyone else. Plans warn
+*"Review overdue"* for 30 days, naming the day your app loses its access.
+After that the app is moved to the quarantine repository at the next apply.
+Renewing — even afterwards — restores its access at the next apply.
 
 ### Remove an app completely
 
@@ -159,7 +159,6 @@ repository and flag it:
 
 ```hcl
 imgbot = {
-  installation_id = "164802659"
   owner           = "web-team"
   purpose         = "..."
   justification   = "..."
@@ -213,17 +212,16 @@ created.
 
 | Message contains | What it means | What to do |
 | --- | --- | --- |
-| `passed its review_by date` | An app's review has lapsed — possibly **not yours** | If it is yours: [renew](#renew-a-review) or [quarantine](#remove-an-app-completely). If not: tell the owner named in the message, and the platform team |
-| `more than 366 days away` | Your `review_by` is too far out | Pick a date within a year |
+| `is in the catalogue but not installed` | A new app, not installed yet | Expected until an organisation owner installs it — see [Request a new app](#request-a-new-app) |
+| `is high risk` / `medium risk` … `further away` | `review_by` beyond the tier limit | Pick an earlier date: 90 days for high, 180 for medium, 366 for low |
 | `must retain at least one repository` | An empty `repositories` list | To remove the app entirely, use the quarantine stage |
 | `must list exactly the quarantine repository` | `decommissioning = true` with real repositories, or `app-quarantine` on a normal app | Quarantine means `["app-quarantine"]` and nothing else |
-| `installation_id must be the numeric ID` / `the '…' installation in the org is …` | Wrong or placeholder installation ID | Copy the ID the message suggests, or ask the platform team |
 | `does not exist in Delta-SK` | A repository name is misspelled | Fix the name |
 | `needs a purpose and a justification` / `named owning team` | A field is empty | Fill it in |
 | `both catalogued and tombstoned` | The app is in both files | Remove it from one |
 | `destroy guard` failure | You removed an app that is not quarantined yet | Do stage 1 first |
 | `validate` failed at *terraform fmt* | Formatting | The log shows the expected layout; copy the indentation of the entries around yours, or ask a platform engineer to run `terraform fmt` |
-| Warning `Value for undeclared variable` | The file sets something that is not catalogue data, such as `max_review_days` | Remove it. Policy settings live in `terraform/settings.tf` and change through the platform team |
+| Warning `Value for undeclared variable` | The file sets something that is not catalogue data, such as a review limit, or an old `installation_id` | Remove it. Policy settings live in `terraform/settings.tf` and change through the platform team |
 
 Warnings (⚠️ under *governance checks* in the plan comment) never block your
 pull request. They usually describe something elsewhere in the org, and the
@@ -268,8 +266,9 @@ Most of the job needs nothing but the GitHub web interface and `gh`.
 2. **Merge** with **Squash and merge**, then glance at the `terraform-apply`
    run: *plan of record* shows what was applied, *Show resulting access
    matrix* the result.
-3. **App requests.** Issues labelled `app-request`: review, reply, and if
-   approved install the app (see [Install an approved app](#install-an-approved-app)).
+3. **App requests** are pull requests whose plan says *"not installed"*:
+   review the request, reply, and if approved install the app (see
+   [Install an approved app](#install-an-approved-app)).
 
 ### Weekly — Monday, after 07:00 UTC
 
@@ -284,17 +283,18 @@ The `reconcile` workflow runs at 07:00 UTC. Then:
 
 | Finding | What it means | What to do |
 | --- | --- | --- |
-| **The plan failed** + `passed its review_by date` | An app's review lapsed. **All catalogue changes are blocked** until fixed | Contact the owning team named in the message today. They renew or quarantine. If they are unreachable, open the quarantine pull request yourself |
+| **The plan failed** + `not installed` | A catalogued app was uninstalled by hand. Every plan fails until the entry is removed, because the provider cannot read a missing installation | If the removal was intended, move the entry to the tombstones (removal stage 3). Otherwise reinstall the app |
+| **Changes pending** + `check.reviews_have_lapsed` | A review lapsed; that app's access is moving to quarantine | Run `terraform-apply` (Actions → *Run workflow*) to enforce it now, or let the next merge do it. Tell the owning team |
 | **The plan failed**, other error | Credential expired, API outage, or broken configuration | Open the workflow log. `401 Bad credentials` → [rotate the token](#rotate-the-github-token). Anything else → fix via pull request |
 | **Drift** | Access was changed in the GitHub UI | Find out who and why. If the change was right, codify it in a pull request. If not, revert it: Actions → `terraform-apply` → **Run workflow** |
 | `check.installations_are_declared` — *Undeclared* | An app nobody catalogued: someone installed it outside the process | [Handle an orphan](#handle-an-orphan) |
 | `check.installations_are_declared` — *repository_selection=all* | A catalogued app was switched to "All repositories" in the UI | Switch it back (app → Configure → Only select repositories, any one repository), then run `terraform-apply` to restore the exact list |
-| `check.catalogue_matches_installations` | A catalogued app was uninstalled by hand | If intended, tombstone it (stage 3 of removal, without stage 1). Otherwise reinstall and update its `installation_id` |
 | `check.tombstones_are_uninstalled` | A removed app is still — or again — installed. The message says why it was removed | Just after a stage-3 merge: finish the uninstall. Otherwise: someone reinstalled it; talk to them, then uninstall or re-catalogue it via pull request |
 | `check.owners_are_real_teams` | An owner team was deleted or renamed | Find the successor team; open a pull request changing `owner` |
 | `check.no_suspended_installations` | A catalogued app was suspended outside the removal process | Find out why. Either unsuspend or start its removal |
 | `check.permissions_match_catalogue` | An app's live permissions differ from its approved `permissions` — usually an owner accepted an app update asking for more | Find who accepted it (org audit log on Enterprise; otherwise ask the owners). Then either a pull request recording the new permissions, with the reason, approved by the owning team — or quarantine the app |
 | `check.reviews_are_due_soon` | Reviews due within 30 days | Nudge the owning teams; nothing to fix yet |
+| `check.reviews_are_overdue` | Review date passed; access moves to quarantine on the date shown | Remind the owning team: renew, or let it lapse |
 | **This repository's own controls were weakened** | Someone changed the ruleset on `main`, an environment, secret scanning, private vulnerability reporting, secrets or CODEOWNERS in the UI — or a break-glass bypass was never removed | Re-apply bootstrap (see [Change bootstrap](#change-bootstrap-teams-reviewers-rules-on-main)); find out who and why |
 
 #### Handle an orphan
@@ -350,24 +350,18 @@ The `reconcile` workflow runs at 07:00 UTC. Then:
 
 ### Install an approved app
 
+Only after the request pull request has been reviewed and the app approved.
+
 1. Open the app's install page (Marketplace or the vendor's link) → install
    on **Delta-SK**.
 2. Choose **Only select repositories** and pick **one** repository from the
-   approved list — the least sensitive. Terraform sets the full list later.
-3. Open org **Settings → GitHub Apps → the app → Configure** and copy the
-   number at the end of the URL. That is the installation ID. Or, for the ID
-   and the exact permissions in catalogue form:
-
-   ```bash
-   gh api orgs/Delta-SK/installations \
-     --jq '.installations[] | select(.app_slug == "<slug>") | {id, permissions}'
-   ```
-
-4. Post the ID and permissions on the request issue. The requester (or you)
-   opens the catalogue pull request.
-
-Until that pull request is merged, the app is an orphan in every plan. Merge
-it the same day.
+   requested list — the least sensitive. Terraform sets the full list.
+3. Re-run the request's plan: Actions → the pull request's `terraform-plan`
+   run → **Re-run all jobs**. It should now be green, and the permissions
+   check should pass. If it warns that permissions differ, the entry is wrong
+   or the app asked for more than its page showed — resolve that in the pull
+   request before approving.
+4. Merge the same day. Until then the app is an orphan in every other plan.
 
 ### Uninstall an app (removal stage 4)
 

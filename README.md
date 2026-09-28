@@ -57,8 +57,9 @@ codeql.yml               every PR + weekly: CodeQL on the workflows -> Security 
 | --- | --- |
 | `terraform/catalogue.auto.tfvars` | The catalogue. Apps, owners, review dates, repo access |
 | `terraform/decommissioned.auto.tfvars` | Tombstones: apps removed, when, and why |
-| `terraform/settings.tf` | Policy settings (org, review horizon, quarantine repo) — code, deliberately not variables |
-| `terraform/app_access.tf` | Enforces repo access per app; preconditions for expiry, review horizon, installation ID |
+| `terraform/settings.tf` | Policy settings (org, review tiers, grace period, quarantine repo) — code, deliberately not variables |
+| `terraform/review.tf` | Review tier and status per app; a lapsed review narrows access to quarantine |
+| `terraform/app_access.tf` | Enforces repo access per app; installation ID looked up by slug; preconditions for installed apps and review limits |
 | `terraform/repositories.tf` | Repositories (including the quarantine repository): rulesets, secret scanning, push protection |
 | `terraform/checks.tf` | Warnings: orphans, tombstoned apps reinstalled, ghost owners, suspensions, reviews due |
 | `terraform/data.tf` | Live inventory: installations, teams, externally managed repositories |
@@ -248,9 +249,9 @@ Why `terraform-plan` is safe without approval:
   HCL forbids function calls and references in them — so they cannot execute
   anything. Symlinks are refused rather than followed.
 - The *rules* that judge the catalogue are locals in `terraform/settings.tf`,
-  not variables. A catalogue file therefore cannot set `max_review_days =
-  99999` or point the plan at another organisation: Terraform ignores
-  undeclared variables with a warning. (Verified: a catalogue carrying both
+  not variables. A catalogue file therefore cannot lengthen the review limits
+  or point the plan at another organisation: Terraform ignores undeclared
+  variables with a warning. (Verified: a catalogue carrying such overrides
   still fails the review-horizon precondition.)
 - Its environment, `plan`, admits `main` only, so the credential cannot be
   reached by any other workflow definition.
@@ -436,26 +437,21 @@ Install each app on the org and set it to **"Only select repositories"**. An
 installation set to *All repositories* exposes no per-repo scope, so there is
 nothing for Terraform to govern — `checks.tf` fails the plan if it finds one.
 
-### 3. Record installation IDs
+### 3. Catalogue the apps
 
-Read them straight from the API — before the first `terraform apply`, because
-until the catalogue holds the right IDs the apply would act on the wrong
-installations (the installation-ID precondition refuses it, but the point is
-not to get there):
+For each installed app, read its slug and approved permissions:
 
 ```bash
 gh api orgs/<your-org>/installations \
-  --jq '.installations[] | {app_slug, id, repository_selection, permissions}'
+  --jq '.installations[] | {app_slug, repository_selection, permissions}'
 ```
 
-Copy each app's slug, ID and `permissions` into `catalogue.auto.tfvars`,
-together with an owning team (which must exist — see `app_owner_teams` in
-bootstrap), a purpose, a justification and a `review_by` date no more than a
-year away. Recording the permissions is the approval of what the app may do;
-from then on any change to them is reported.
-
-This ordering is unavoidable: an app must already be installed before its
-access can be managed, and Terraform cannot install apps (see *Limitations*).
+Add an entry per app to `catalogue.auto.tfvars`: owning team (which must
+exist — see `app_owner_teams` in bootstrap), purpose, justification,
+repositories, `permissions`, and a `review_by` within the limit for its risk
+tier. The installation ID is not recorded; Terraform looks it up by slug.
+Recording the permissions is the approval of what the app may do; from then
+on any change to them is reported.
 
 ### 4. First apply
 
@@ -563,9 +559,8 @@ Controls are split deliberately between **blocking** and **warning**.
 
 | Control | Where | Refuses |
 | --- | --- | --- |
-| Expiry | precondition, `app_access.tf` | An app past its `review_by` date (unless `decommissioning = true`) |
-| Review horizon | precondition, `app_access.tf` | A `review_by` more than `max_review_days` (366) away — an opt-out from review |
-| Installation ID | precondition, `app_access.tf` | An `installation_id` that is not the installed ID for that app's slug — Terraform would otherwise re-point the resource at another app's installation |
+| Review horizon by risk | precondition, `app_access.tf` | A `review_by` further away than the app's tier allows: 90 days if it can write to workflows, actions, administration, hooks, environments, secrets or members; 180 days for any other write; 366 for read-only |
+| Not installed | precondition, `app_access.tf` | A catalogue entry for an app that is not installed yet — so a request cannot merge before an owner installs the app |
 | Decommissioning shape | validation, `variables.tf` | `decommissioning = true` with anything other than exactly the quarantine repository; the quarantine repository used by any other app |
 | Required fields | validation, `variables.tf` | Empty `owner`, `purpose`, `justification`, empty repository list, malformed dates, missing or invalid `permissions` |
 | Tombstone clash | validation, `variables.tf` | An app both catalogued and tombstoned |
@@ -578,11 +573,12 @@ issue by the weekly reconciler, but never blocks an unrelated change:
 | Check | Detects |
 | --- | --- |
 | `installations_are_declared` | An app installed but neither catalogued nor tombstoned — *the app nobody remembers installing*; and a catalogued app set to *All repositories*, which cannot be governed |
-| `catalogue_matches_installations` | A catalogued app that is no longer installed |
 | `tombstones_are_uninstalled` | A decommissioned app that is still — or again — installed, with the reason it was removed |
 | `owners_are_real_teams` | An `owner` that is not an existing team — how ownership silently rots in a reorg |
 | `no_suspended_installations` | A catalogued app suspended outside the runbook; suspension keeps every grant |
-| `reviews_are_due_soon` | An entry within `review_warning_days` (30) of expiry |
+| `reviews_are_due_soon` | A review due within 30 days |
+| `reviews_are_overdue` | A review date passed, within the 30-day grace period — with the date access will move to quarantine |
+| `reviews_have_lapsed` | Grace period over: the app's access **has been narrowed to the quarantine repository** in the plan, and the next apply enforces it |
 | `permissions_match_catalogue` | An installation whose live permissions differ from the approved `permissions` in its entry — typically an owner accepting an app update's request for more access in the UI |
 
 Weekly, `reconcile.yml` additionally runs `scripts/verify-repo-controls.sh`,
@@ -592,10 +588,11 @@ The split is the point. **A defect introduced by the pull request blocks that
 pull request**, because the author can fix it. **Something that happened
 elsewhere in the org — an orphan, a deleted team — warns**, because halting
 everyone's work until it is resolved would just teach people to bypass the
-pipeline. Expiry is the one exception, and a deliberate one: a review date
-that never stops anything is decoration. With one state file it blocks every
-apply, not only the owner's; per-team state is the fix at scale
-(docs/GOVERNANCE.md §7).
+pipeline. **Expiry blocks nothing — it revokes.** Thirty days after
+`review_by`, an app that was not renewed is narrowed to the quarantine
+repository in every plan, and the next apply enforces it. So a review date
+still has teeth, but one team's lapse never turns another team's pull request
+red.
 
 Time-based conditions use `plantimestamp()` rather than `timestamp()`: the
 latter is unknown at plan time, so the condition would only evaluate during
@@ -605,10 +602,14 @@ apply — after review rather than during it.
 test org with every check passing. Each blocking control and each warning was
 then exercised by planning against the same org with a deliberately broken
 catalogue (a `-var-file` override, plan only, Terraform 1.16.4): all
-fifteen cases — including one that tries to override `max_review_days` and
+fifteen cases — including one that tries to override policy settings and
 `github_org` from a catalogue file, and one whose approved permissions no
 longer match the installation — failed or warned with the expected message,
-and the guard was run against the resulting saved plans. Expiry blocking and the reconciler issue flow were exercised in
+and the guard was run against the resulting saved plans. The review model was
+then exercised the same way: due soon, overdue within the grace period
+(warning only), lapsed (the plan moves that app, and only that app, to
+quarantine), dates beyond the high and medium tier limits (blocked), and a
+new app that is not yet installed (blocked). Expiry blocking and the reconciler issue flow were exercised in
 CI (issue #3). To see the orphan path end to end, install any app without
 cataloguing it and run `gh workflow run reconcile.yml`.
 
@@ -633,7 +634,7 @@ them from the file.
 | `.github/workflows/*.yml` | `AWS_REGION` | Must match the backend region |
 | Repository settings | variables `AWS_PLAN_ROLE_ARN`, `AWS_APPLY_ROLE_ARN`; secrets `TF_GITHUB_TOKEN` in `plan` and `production`, `TF_GITHUB_READ_TOKEN` in `plan-code` | Role ARNs are bootstrap outputs. Never repository-level secrets — see *Setup* step 1 |
 | `terraform/settings.tf` | `github_org` | A local, not a variable — see *The trust boundary* |
-| `terraform/catalogue.auto.tfvars` | `repositories`, every `installation_id` and `owner` | IDs are per installation and never carry over — see *Setup* step 3 |
+| `terraform/catalogue.auto.tfvars` | `repositories`, every app's `owner` and `permissions` | See *Setup* step 3 |
 | `terraform/decommissioned.auto.tfvars` | tombstones | Start from `{}` |
 | `.github/CODEOWNERS` | `@Delta-SK/...` | The team must exist and be visible, or CODEOWNERS silently routes nothing (the reconciler checks) |
 
@@ -688,10 +689,12 @@ at scale*); on the plan used here it is a human action. This shapes the
 decommissioning runbook: Terraform narrows access to the quarantine
 repository and then releases the app, a human removes the installation.
 
-**Installation IDs are discovered, not derived.** They must be copied into the
-catalogue. `gh api orgs/<org>/installations` and the `org_installations`
-output make that a lookup rather than a hunt, and a precondition refuses an ID
-that does not belong to the named app.
+**An app must be installed before its entry can be applied.** Terraform
+cannot install apps, so a new-app pull request stays red ("not installed")
+until an organisation owner installs the app, and is then re-run. If an app
+is uninstalled by hand while still catalogued, the provider cannot read its
+installation and every plan fails until the entry is removed — which is why
+the runbook releases an app before uninstalling it.
 
 **The access resource is authoritative.** Applying it removes any repository
 access not in the catalogue. That is the point, but the first apply against an
@@ -774,19 +777,17 @@ and deliberately so — every use is a visible change to the ruleset, and the
 weekly controls check reports a bypass actor until it is gone
 (docs/OPERATIONS.md, *Break-glass*).
 
-**Expiry blocks org-wide.** A resource precondition failure aborts the whole
-plan, so with one state file one team's lapsed app blocks every team's change
-until it is renewed or quarantined. Deliberate, bounded by per-team state at
-scale (docs/GOVERNANCE.md §7).
+**Expiry depends on the clock, by design.** A plan on the day after an app's
+grace period ends shows that app moving to quarantine, with no commit in
+between. That is the point of an expiry date; it is visible in every plan
+comment and in the reconciler's issue, and it never fails a plan. The move
+happens at the next apply — a merge or a manual `terraform-apply` run — not
+on the stroke of midnight.
 
-**Nothing removes access automatically.** Expiry blocks the plan and the
-reconciler raises an issue naming the owner; a human still has to open the
-renewal or quarantine pull request. The auto-generated quarantine PR in the
-escalation ladder is designed, not built.
-
-**A quarantined app is not chased.** Once an app is quarantined it is exempt
-from expiry, and nothing warns if it sits there beyond the soak period. The
-exposure is small — it reaches one empty repository — but it is a loose end.
+**A quarantined app is not chased.** Once an app is quarantined — by a
+decommissioning pull request or by a lapsed review — nothing warns if it sits
+there indefinitely. The exposure is small, since it reaches one empty
+repository, but uninstalling it is still a human step.
 
 **One catalogue, one state.** The per-team split described in
 `docs/GOVERNANCE.md` is a design, not an implementation. At two apps it would
@@ -810,9 +811,6 @@ In rough order of what I would add next:
   the ruleset, blocking pull requests that introduce high-severity CodeQL
   findings. Deferred until CodeQL has a baseline analysis on `main`; adding it
   first would block the pull request that introduces CodeQL.
-- **Automated quarantine pull request** — opened by the reconciler once an app
-  passes expiry, so the default outcome is removal rather than a blocked
-  pipeline.
 - **Policy-as-code** (OPA/Conftest) for rules the type system cannot express —
   e.g. "no app may reach `payments-api` without a security review label".
 - **Per-team catalogue and state split**, with CODEOWNERS routing each team's

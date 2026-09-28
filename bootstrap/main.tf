@@ -275,3 +275,94 @@ resource "aws_iam_role_policy" "apply_state_write" {
   role   = aws_iam_role.apply.id
   policy = data.aws_iam_policy_document.state_write.json
 }
+
+# ---------------------------------------------------------------------------
+# Audit role: the weekly reconciler plans THIS configuration read-only, so
+# drift in the controls bootstrap defines is found by the code that defines
+# them. Main only (production environment); reads bootstrap state and the
+# metadata of the resources above, nothing else. The action list is what a
+# bootstrap plan was observed to call, from CloudTrail.
+# ---------------------------------------------------------------------------
+
+data "aws_iam_policy_document" "assume_audit" {
+  statement {
+    effect  = "Allow"
+    actions = ["sts:AssumeRoleWithWebIdentity"]
+
+    principals {
+      type        = "Federated"
+      identifiers = [aws_iam_openid_connect_provider.github.arn]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "token.actions.githubusercontent.com:aud"
+      values   = ["sts.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "token.actions.githubusercontent.com:sub"
+      values   = ["${local.subject_prefix}:environment:production"]
+    }
+  }
+}
+
+resource "aws_iam_role" "audit" {
+  name               = "github-app-governance-audit"
+  description        = "Read-only plan of bootstrap/ for drift detection, from main."
+  assume_role_policy = data.aws_iam_policy_document.assume_audit.json
+}
+
+data "aws_iam_policy_document" "audit_read" {
+  statement {
+    effect    = "Allow"
+    actions   = ["s3:GetObject"]
+    resources = ["${aws_s3_bucket.state.arn}/github-app-governance/bootstrap.tfstate"]
+  }
+
+  statement {
+    effect = "Allow"
+    actions = [
+      "s3:ListBucket",
+      "s3:ListTagsForResource",
+      "s3:GetAccelerateConfiguration",
+      "s3:GetBucketAcl",
+      "s3:GetBucketCORS",
+      "s3:GetBucketLogging",
+      "s3:GetBucketObjectLockConfiguration",
+      "s3:GetBucketPolicy",
+      "s3:GetBucketPublicAccessBlock",
+      "s3:GetBucketRequestPayment",
+      "s3:GetBucketVersioning",
+      "s3:GetBucketWebsite",
+      "s3:GetEncryptionConfiguration",
+      "s3:GetLifecycleConfiguration",
+      "s3:GetReplicationConfiguration",
+    ]
+    resources = [aws_s3_bucket.state.arn]
+  }
+
+  statement {
+    effect = "Allow"
+    actions = [
+      "iam:GetRole",
+      "iam:GetRolePolicy",
+      "iam:ListAttachedRolePolicies",
+      "iam:ListRolePolicies",
+    ]
+    resources = [aws_iam_role.plan.arn, aws_iam_role.apply.arn, aws_iam_role.audit.arn]
+  }
+
+  statement {
+    effect    = "Allow"
+    actions   = ["iam:GetOpenIDConnectProvider"]
+    resources = [aws_iam_openid_connect_provider.github.arn]
+  }
+}
+
+resource "aws_iam_role_policy" "audit_read" {
+  name   = "bootstrap-plan-read"
+  role   = aws_iam_role.audit.id
+  policy = data.aws_iam_policy_document.audit_read.json
+}

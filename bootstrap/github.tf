@@ -103,8 +103,8 @@ resource "terraform_data" "private_vulnerability_reporting" {
   }
 }
 
-// Labels the automation depends on. `reconciliation` already existed
-// (created implicitly by the first reconciler issue) and is adopted.
+// The label the reconciler's issue depends on. It already existed (created
+// implicitly by the first reconciler issue) and is adopted.
 import {
   to = github_issue_label.automation["reconciliation"]
   id = "${var.github_repo}:reconciliation"
@@ -116,16 +116,37 @@ resource "github_issue_label" "automation" {
       color       = "D93F0B"
       description = "Opened by reconcile.yml: the organisation does not match the catalogue"
     }
-    app-request = {
-      color       = "0E8A16"
-      description = "A request to install a GitHub App or widen its access (issue form)"
-    }
   }
 
   repository  = github_repository.governance.name
   name        = each.key
   color       = each.value.color
   description = each.value.description
+}
+
+// The role ARNs the workflows assume, published as repository variables so
+// no one copies them by hand. Two existed before this was code and are
+// adopted.
+import {
+  to = github_actions_variable.role_arn["AWS_PLAN_ROLE_ARN"]
+  id = "${var.github_repo}:AWS_PLAN_ROLE_ARN"
+}
+
+import {
+  to = github_actions_variable.role_arn["AWS_APPLY_ROLE_ARN"]
+  id = "${var.github_repo}:AWS_APPLY_ROLE_ARN"
+}
+
+resource "github_actions_variable" "role_arn" {
+  for_each = {
+    AWS_PLAN_ROLE_ARN  = aws_iam_role.plan.arn
+    AWS_APPLY_ROLE_ARN = aws_iam_role.apply.arn
+    AWS_AUDIT_ROLE_ARN = aws_iam_role.audit.arn
+  }
+
+  repository    = github_repository.governance.name
+  variable_name = each.key
+  value         = each.value
 }
 
 // ---------------------------------------------------------------------------

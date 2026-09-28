@@ -87,10 +87,32 @@ jobs:
           echo "failed_checks=$FAILED" >> "$GITHUB_OUTPUT"
           echo "plan exit=$CODE, failed checks=$FAILED"
 
-      # bootstrap/ owns this repository's branch protection, environments and
-      # CODEOWNERS team, and is applied by hand with its own state so CI cannot
-      # rewrite them. The price is that no plan ever looks at them. This does.
-      - name: Verify this repository's own controls
+      # bootstrap/ defines this repository's own controls and is applied by
+      # hand, so CI cannot rewrite them. Planning it read-only finds any drift
+      # from the same code that defines them.
+      - name: Configure AWS credentials (OIDC, bootstrap audit)
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_AUDIT_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Plan bootstrap (drift check)
+        id: bootstrap
+        working-directory: bootstrap
+        env:
+          GITHUB_TOKEN: ${{ secrets.TF_GITHUB_TOKEN }}
+        run: |
+          set +e
+          terraform init -input=false -no-color > /dev/null
+          terraform plan -lock=false -detailed-exitcode -input=false -no-color > ../terraform/bootstrap-plan.txt 2>&1
+          code=$?
+          echo "exitcode=$code" >> "$GITHUB_OUTPUT"
+          grep -E '^  # |^Plan:|^Error' ../terraform/bootstrap-plan.txt || true
+          echo "bootstrap plan exit=$code"
+
+      # What a plan cannot see: settings Terraform does not manage, and things
+      # added beside the resources it does.
+      - name: Verify controls outside Terraform
         id: controls
         env:
           GH_TOKEN: ${{ secrets.TF_GITHUB_TOKEN }}
@@ -103,11 +125,12 @@ jobs:
       - name: Raise or update reconciliation issue
         if: >-
           steps.plan.outputs.exitcode != '0' || steps.plan.outputs.failed_checks != '0' ||
-          steps.controls.outputs.failed != '0'
+          steps.controls.outputs.failed != '0' || steps.bootstrap.outputs.exitcode != '0'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           EXITCODE: ${{ steps.plan.outputs.exitcode }}
           CONTROLS_FAILED: ${{ steps.controls.outputs.failed }}
+          BOOTSTRAP_EXIT: ${{ steps.bootstrap.outputs.exitcode }}
         with:
           script: |
             const fs = require('fs');
@@ -118,6 +141,8 @@ jobs:
             const code = process.env.EXITCODE;
             const failedChecks = read('terraform/failed_checks.txt').trim().split('\n').filter(Boolean);
             const controls = read('terraform/controls.txt').trim();
+            const bootstrapChanges = read('terraform/bootstrap-plan.txt').split('\n')
+              .filter(l => /^  # |^Plan:|^Error/.test(l)).join('\n');
 
             // Every finding is listed, not just the first: an orphan and an
             // expired app in the same week are two different owners' problems.
@@ -127,7 +152,9 @@ jobs:
             if (code === '1') findings.push('**The plan failed.** Most often a catalogued app that is not installed — the error names it.');
             if (code === '2') findings.push('**Changes pending:** GitHub differs from what the catalogue requires — access changed outside a pull request, or a lapsed review moving an app to quarantine (see the governance checks). Run `terraform-apply` to enforce it, or codify a deliberate manual change in a pull request.');
             if (failedChecks.length) findings.push(`**Governance checks failed:** ${failedChecks.map(c => '`' + c + '`').join(', ')}. The messages in the plan output say what to do.`);
-            if (process.env.CONTROLS_FAILED !== '0') findings.push('**This repository\'s own controls were weakened:**\n\n' + controls + '\n\nRestore them by re-applying `bootstrap/`.');
+            if (process.env.BOOTSTRAP_EXIT === '2') findings.push('**This repository\'s controls differ from `bootstrap/`** — changed outside Terraform:\n\n```\n' + bootstrapChanges + '\n```\n\nRe-apply `bootstrap/` to restore them, or codify the change in a pull request.');
+            if (process.env.BOOTSTRAP_EXIT === '1') findings.push('**The drift check on `bootstrap/` could not run:**\n\n```\n' + bootstrapChanges + '\n```');
+            if (process.env.CONTROLS_FAILED !== '0') findings.push('**Controls outside Terraform are missing:**\n\n' + controls + '\n\nRestore them — docs/OPERATIONS.md, "Triage a reconciliation issue".');
 
             const title = 'Reconciliation: organisation does not match the catalogue';
             const body = [
@@ -171,7 +198,7 @@ jobs:
       - name: Close the reconciliation issue when clean
         if: >-
           steps.plan.outputs.exitcode == '0' && steps.plan.outputs.failed_checks == '0' &&
-          steps.controls.outputs.failed == '0'
+          steps.controls.outputs.failed == '0' && steps.bootstrap.outputs.exitcode == '0'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
@@ -199,5 +226,5 @@ jobs:
       - name: Fail the run when reconciliation found something
         if: >-
           steps.plan.outputs.exitcode != '0' || steps.plan.outputs.failed_checks != '0' ||
-          steps.controls.outputs.failed != '0'
+          steps.controls.outputs.failed != '0' || steps.bootstrap.outputs.exitcode != '0'
         run: exit 1

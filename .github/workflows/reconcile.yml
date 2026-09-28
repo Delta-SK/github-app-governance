@@ -78,7 +78,11 @@ jobs:
           echo "plan exit=$CODE, failed checks=$FAILED"
 
       # Drift in bootstrap/, found by planning it (docs/decisions/0006).
+      # If the role cannot be assumed, the issue says so instead of the job
+      # failing before it can report anything.
       - name: Configure AWS credentials (OIDC, bootstrap audit)
+        id: audit_role
+        continue-on-error: true
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: ${{ vars.AWS_AUDIT_ROLE_ARN }}
@@ -89,8 +93,15 @@ jobs:
         working-directory: bootstrap
         env:
           GITHUB_TOKEN: ${{ secrets.TF_GITHUB_TOKEN }}
+          ROLE_OUTCOME: ${{ steps.audit_role.outcome }}
         run: |
           set +e
+          if [ "$ROLE_OUTCOME" != success ]; then
+            echo "Error: could not assume the audit role (is AWS_AUDIT_ROLE_ARN set? bootstrap/ must be applied)" > ../terraform/bootstrap-plan.txt
+            echo "exitcode=1" >> "$GITHUB_OUTPUT"
+            cat ../terraform/bootstrap-plan.txt
+            exit 0
+          fi
           terraform init -input=false -no-color > /dev/null
           terraform plan -lock=false -detailed-exitcode -input=false -no-color > ../terraform/bootstrap-plan.txt 2>&1
           code=$?

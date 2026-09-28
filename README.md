@@ -171,10 +171,10 @@ terraform apply
 ```
 
 Creates the S3 state bucket (versioned, encrypted, TLS-only, locking
-S3-native), the GitHub OIDC provider, both CI roles, the
-`platform-engineering` team, the app-owning teams listed in
-`app_owner_teams`, this repository's branch protection, and the three Actions
-environments (`plan`, `plan-code`, `production`).
+S3-native), the GitHub OIDC provider, the three CI roles (plan, apply,
+audit), the `platform-engineering` team, the app-owning teams listed in
+`app_owner_teams`, this repository's settings and its ruleset on `main`, and
+the three Actions environments (`plan`, `plan-code`, `production`).
 
 Bootstrap needs AWS administrator credentials and the classic PAT, and it is
 **not** run by CI — see *Limitations* for why, and for what checks it instead.
@@ -288,8 +288,10 @@ Narrowing Renovate from two repositories to one:
 5. Verify against GitHub itself, not against state:
 
    ```bash
+   id=$(gh api orgs/Delta-SK/installations \
+     --jq '.installations[] | select(.app_slug == "renovate") | .id')
    curl -H "Authorization: Bearer $GITHUB_TOKEN" \
-     https://api.github.com/user/installations/164801077/repositories \
+     "https://api.github.com/user/installations/$id/repositories" \
      | jq -r '.repositories[].full_name'
    ```
 
@@ -503,8 +505,8 @@ In rough order of what I would add next:
 
 - **The Enterprise Cloud credential path** — an enterprise-owned GitHub App
   and a thin adapter over the organisation-installations API, retiring the
-  classic PAT (see *What this costs, and what it would cost at scale*). Not
-  buildable on the Free-plan test organisation.
+  classic PAT ([0001](docs/decisions/0001-classic-pat-for-installation-access.md)).
+  Not buildable on the Free-plan test organisation.
 - **Required code scanning on `main`** — a `required_code_scanning` rule in
   the ruleset, blocking pull requests that introduce high-severity CodeQL
   findings. Deferred until CodeQL has a baseline analysis on `main`; adding it

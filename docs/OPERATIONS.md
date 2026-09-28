@@ -475,7 +475,7 @@ take a repository out of Terraform without deleting it:
    ```bash
    cd terraform && terraform init
    terraform state rm 'github_repository.this["old-repo"]' \
-     'github_branch_protection.main["old-repo"]' \
+     'github_repository_ruleset.main["old-repo"]' \
      'github_repository_vulnerability_alerts.this["old-repo"]'
    ```
 

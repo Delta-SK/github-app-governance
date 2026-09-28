@@ -1,23 +1,11 @@
 name: terraform-plan
 
-# Plans every pull request automatically — no approval, and no pull request
-# code ever runs.
+# Plans every pull request with MAIN's code and only the pull request's
+# catalogue data, so no approval is needed: no pull request code runs beside
+# the admin token (docs/decisions/0002).
 #
-# pull_request_target runs THIS FILE AS IT IS ON MAIN, in a checkout of main.
-# The only thing taken from the pull request is its catalogue data (the
-# *.auto.tfvars files), fetched as plain file contents by
-# scripts/take-pr-catalogue.sh. Variable files cannot execute anything, and
-# everything that interprets them — the Terraform code, the scripts, this
-# workflow — comes from main. That is what makes it safe to give this job the
-# organisation-admin credential with nobody approving the run.
-#
-# A pull request that changes code is planned here with MAIN's code, which is
-# not what it will do once merged; the comment says so, and
-# terraform-plan-code.yml plans its own code, automatically, with a read-only
-# token.
-#
-# Never add a step that checks out, installs, builds or runs anything from the
-# pull request. That turns this workflow into a textbook "pwn request".
+# Never add a step that checks out, builds or runs anything from the pull
+# request — that would hand the admin token to every branch.
 
 on:
   pull_request_target:
@@ -42,8 +30,7 @@ jobs:
       statuses: write # the terraform-plan status on the pull request's head
       id-token: write # OIDC to the read-only state role
 
-    # Main only, no reviewer (bootstrap/github.tf). The credential is
-    # reachable here because this definition can only come from main.
+    # Main only: this definition can only come from main.
     environment: plan
 
     env:
@@ -54,9 +41,7 @@ jobs:
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
     steps:
-      # The required check is a commit status on the PR head, not this job's
-      # check run: pull_request_target runs against the base commit, and its
-      # check run is not guaranteed to attach to the head.
+      # A commit status on the PR head (docs/decisions/0002).
       - name: Mark terraform-plan pending
         run: >-
           gh api "repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" --silent
@@ -64,8 +49,7 @@ jobs:
           -f description="Planning this pull request's catalogue"
           -f target_url="$RUN_URL"
 
-      # This job holds the org-admin credential. A fork's data is still only
-      # data, but there is no reason to spend that credential on strangers.
+      # No reason to spend the admin token on strangers' data.
       - name: Reject fork pull requests
         if: env.HEAD_REPO != github.repository
         run: |

@@ -1,27 +1,11 @@
 #!/usr/bin/env bash
-# Replace this checkout's catalogue data with a pull request's — and nothing
-# else. Used by terraform-plan.yml, which runs main's code with the
-# organisation-admin credential and therefore must never run pull request
-# code.
+# Replace this checkout's catalogue data with a pull request's, and nothing
+# else: the auto-loaded *.tfvars files at <head-sha>, fetched through the
+# contents API (pinned to the commit; symlinks refused). Writes
+# code_changes.txt listing any non-data change. docs/decisions/0002.
 #
 # Usage (from the repository root, GH_TOKEN set):
 #   scripts/take-pr-catalogue.sh <owner/repo> <pr-number> <head-sha>
-#
-# What it takes: the files Terraform loads automatically from terraform/ —
-# terraform.tfvars, *.auto.tfvars and their .json forms — exactly as they are
-# at <head-sha>. Variable definition files are pure data: HCL forbids function
-# calls and references in them, so they cannot execute anything. Policy knobs
-# are locals in terraform/settings.tf, not variables, so these files cannot
-# change the rules either.
-#
-# Why the contents API rather than `git checkout`: it is pinned to the exact
-# commit (no race with a later push), it reports symlinks as symlinks (a
-# symlink named x.auto.tfvars pointing at /proc/self/environ must not be
-# followed), and it needs no git credentials persisted on disk.
-#
-# Writes code_changes.txt: every changed file in the pull request that is not
-# catalogue data or documentation. Non-empty means the plan, which uses main's
-# code, does not show what this pull request's code would do.
 
 set -euo pipefail
 

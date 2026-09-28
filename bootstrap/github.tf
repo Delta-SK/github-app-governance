@@ -1,12 +1,6 @@
-// Configuration of the governance repository itself, and the team that
-// reviews it.
-//
-// This lives in bootstrap rather than in ../terraform deliberately. It has
-// its own state, so a failed apply here cannot leave the main configuration
-// unable to merge, and a failed apply there cannot strip the controls
-// protecting this repository. Managing a repository's branch protection from
-// the same state that the repository's own CI applies is a lockout waiting to
-// happen.
+// The governance repository itself, its rules, environments and reviewing
+// team. Separate from ../terraform so CI cannot rewrite the controls that
+// constrain it (docs/decisions/0006).
 
 provider "github" {
   owner = var.github_org
@@ -16,10 +10,7 @@ provider "github" {
 // The governance repository itself
 // ---------------------------------------------------------------------------
 
-// Adopted into Terraform rather than created: the repository already existed
-// when these controls were written. The import block is idempotent — once the
-// repository is in state it does nothing, and it stays as the record of where
-// the resource came from.
+// Adopted, not created; the import block is a no-op once in state.
 import {
   to = github_repository.governance
   id = var.github_repo
@@ -32,24 +23,20 @@ resource "github_repository" "governance" {
 
   has_issues   = true // reconciliation findings and app requests live here
   has_projects = true
-  // A wiki is edited outside pull requests and branch rules: an unreviewed
-  // channel next to a reviewed one. Documentation lives in the repository.
+  // A wiki is edited outside pull requests: an unreviewed channel.
   has_wiki = false
 
-  // Squash only, titled and described by the pull request, so each change to
-  // the catalogue is one commit carrying its own justification — the audit
-  // trail is `git log`.
+  // One commit per change, carrying the pull request's justification.
   allow_merge_commit          = false
   allow_rebase_merge          = false
   allow_squash_merge          = true
   squash_merge_commit_title   = "PR_TITLE"
   squash_merge_commit_message = "PR_BODY"
   delete_branch_on_merge      = true
-  // Branches must be up to date before merging; this offers the button.
+  // Branches must be up to date; this offers the button.
   allow_update_branch = true
 
-  // This repository's CI holds an organisation-admin token, and its history
-  // is public. Push protection stops a leaked secret at `git push`.
+  // Push protection stops a leaked token at `git push`.
   security_and_analysis {
     secret_scanning {
       status = "enabled"
@@ -72,8 +59,7 @@ resource "github_repository_vulnerability_alerts" "governance" {
   enabled    = true
 }
 
-// Security fixes for the pinned actions and providers as pull requests, on
-// top of the weekly version updates in .github/dependabot.yml.
+// Security fixes as pull requests, beside the weekly version updates.
 resource "github_repository_dependabot_security_updates" "governance" {
   repository = github_repository.governance.name
   enabled    = true
@@ -81,11 +67,8 @@ resource "github_repository_dependabot_security_updates" "governance" {
   depends_on = [github_repository_vulnerability_alerts.governance]
 }
 
-// SECURITY.md sends reporters to GitHub's private vulnerability reporting.
-// The provider has no resource for that setting, so it is enabled through
-// the REST API here: idempotent (a PUT), re-run if the repository is ever
-// replaced, and verified weekly by scripts/verify-repo-controls.sh. Replace
-// with a native resource once integrations/github offers one.
+// Private vulnerability reporting (SECURITY.md) has no provider resource: an
+// idempotent PUT, verified weekly by scripts/verify-repo-controls.sh.
 resource "terraform_data" "private_vulnerability_reporting" {
   triggers_replace = [github_repository.governance.repo_id]
 
@@ -103,8 +86,7 @@ resource "terraform_data" "private_vulnerability_reporting" {
   }
 }
 
-// The label the reconciler's issue depends on. It already existed (created
-// implicitly by the first reconciler issue) and is adopted.
+// The reconciler's label; adopted.
 import {
   to = github_issue_label.automation["reconciliation"]
   id = "${var.github_repo}:reconciliation"
@@ -124,9 +106,7 @@ resource "github_issue_label" "automation" {
   description = each.value.description
 }
 
-// The role ARNs the workflows assume, published as repository variables so
-// no one copies them by hand. Two existed before this was code and are
-// adopted.
+// Role ARNs for the workflows, so none is copied by hand; two adopted.
 import {
   to = github_actions_variable.role_arn["AWS_PLAN_ROLE_ARN"]
   id = "${var.github_repo}:AWS_PLAN_ROLE_ARN"
@@ -153,9 +133,7 @@ resource "github_actions_variable" "role_arn" {
 // The team that reviews it
 // ---------------------------------------------------------------------------
 
-// CODEOWNERS is inert unless the team exists, is visible, and has write
-// access to the repository. A CODEOWNERS file naming a non-existent team
-// silently routes nothing while appearing to be a control.
+// CODEOWNERS routes nothing unless the team exists, is visible, and can push.
 resource "github_team" "platform_engineering" {
   name        = "platform-engineering"
   description = "Owns GitHub App governance: reviews catalogue changes and the controls enforcing them."
@@ -168,10 +146,7 @@ resource "github_team_repository" "governance" {
   permission = "push"
 }
 
-// Teams that own catalogued apps. These must exist for the
-// owners_are_real_teams check in ../terraform to pass — an owner field naming
-// a team that was never created is indistinguishable from one naming a team
-// that was deleted, and both mean the app is unowned.
+// Teams that own catalogued apps (the demo org has no other source of teams).
 resource "github_team" "app_owners" {
   for_each = var.app_owner_teams
 
@@ -180,16 +155,14 @@ resource "github_team" "app_owners" {
   privacy     = "closed"
 }
 
-// Adding someone who is not yet in the organisation sends them an invitation;
-// they appear here, and can review, once they accept it.
+// New members receive an organisation invitation and review once they accept.
 resource "github_team_members" "platform_engineering" {
   team_slug = github_team.platform_engineering.slug
 
   dynamic "members" {
     for_each = var.platform_team_members
     content {
-      // The API returns member logins lowercased. Without normalising here,
-      // any capitalisation in the variable produces a permanent diff.
+      // The API returns logins lowercased; avoids a permanent diff.
       username = lower(members.key)
       role     = members.value
     }
@@ -200,15 +173,8 @@ resource "github_team_members" "platform_engineering" {
 // Rules on main
 // ---------------------------------------------------------------------------
 
-// A repository ruleset rather than classic branch protection: rulesets apply
-// to administrators unless they are listed as bypass actors, and are readable
-// without an admin token (OpenSSF Scorecard verifies them).
-//
-// There are NO bypass actors. Every change, including an owner's, needs a
-// green validate and terraform-plan and an approval from a code owner other
-// than the last pusher. Break-glass — CI itself broken — is a deliberate,
-// audited change to this resource: add an OrganizationAdmin bypass actor,
-// apply, fix, remove it (docs/OPERATIONS.md, "Break-glass").
+// No bypass actors; break-glass is a change to this resource
+// (docs/decisions/0005, docs/OPERATIONS.md "Break-glass").
 resource "github_repository_ruleset" "governance_main" {
   name        = "main"
   repository  = github_repository.governance.name
@@ -235,14 +201,7 @@ resource "github_repository_ruleset" "governance_main" {
       allowed_merge_methods             = ["squash"]
     }
 
-    // validate       - job in terraform-validate.yml: fmt/validate/lint of
-    //                  the PR's own code, no credentials.
-    // terraform-plan - commit status posted on the PR head by
-    //                  terraform-plan.yml, which runs main's code on the PR's
-    //                  catalogue data. A status rather than the job's check
-    //                  run, because pull_request_target runs against the base
-    //                  commit and GitHub does not document that its check run
-    //                  attaches to the PR head.
+    // terraform-plan is a commit status, not a check run (docs/decisions/0002).
     required_status_checks {
       strict_required_status_checks_policy = true
 
@@ -257,31 +216,10 @@ resource "github_repository_ruleset" "governance_main" {
 }
 
 // ---------------------------------------------------------------------------
-// Environments — the trust boundary for credentials
+// Environments: where each credential is reachable (docs/decisions/0002)
+//   plan, production  main only; TF_GITHUB_TOKEN (admin)
+//   plan-code         any ref, no reviewer; TF_GITHUB_READ_TOKEN only
 // ---------------------------------------------------------------------------
-//
-// Credentials live in these environments, never as repository secrets, so no
-// job can read one implicitly. The rule they encode: the organisation-admin
-// token (TF_GITHUB_TOKEN) only ever meets code that is already on main.
-// Pull request code gets a read-only token and nothing else — so no run
-// needs a human to release a credential, and the only approval left in the
-// whole flow is the pull request review itself.
-//
-//   plan       main only. TF_GITHUB_TOKEN. terraform-plan.yml is a
-//              pull_request_target workflow: GitHub runs main's definition
-//              of it, which plans main's code against the PR's *.tfvars
-//              data. Data cannot execute.
-//   plan-code  any ref. TF_GITHUB_READ_TOKEN only — a fine-grained token
-//              with organisation Administration and Members read.
-//              terraform-plan-code.yml runs a PR's own code with it, so a
-//              malicious PR can at most read what that token reads.
-//   production main only. TF_GITHUB_TOKEN. The pull request was the gate.
-//
-// scripts/verify-repo-controls.sh fails if TF_GITHUB_TOKEN ever appears in
-// plan-code: that single secret is what keeps the rule true.
-//
-// can_admins_bypass = false everywhere: an administrator gains nothing
-// legitimate from bypassing, and it keeps the rule above exceptionless.
 
 resource "github_repository_environment" "plan" {
   repository        = github_repository.governance.name
@@ -294,9 +232,7 @@ resource "github_repository_environment" "plan" {
   }
 }
 
-// No reviewers and no branch policy, deliberately: this environment holds
-// only a read-only token, so a code plan runs as soon as the pull request is
-// pushed and the reviewer sees it before approving — not after.
+// Deliberately open: it holds only the read-only token.
 resource "github_repository_environment" "plan_code" {
   repository        = github_repository.governance.name
   environment       = "plan-code"

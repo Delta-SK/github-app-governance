@@ -1,18 +1,10 @@
 #!/usr/bin/env bash
-# Plan, evaluate the governance checks and the destroy guard, and write a
-# Markdown report for the pull request comment.
+# Plan, evaluate the governance checks and the destroy guard, and write the
+# pull request comment. Shared by both plan workflows. Exit 1 only if the plan
+# or the guard fails; governance checks are warnings.
 #
-# Usage (from terraform/, after `terraform init`, with GITHUB_TOKEN set):
+# Usage (from terraform/, after init, GITHUB_TOKEN set; REPORT_NOTE optional):
 #   ../scripts/plan-report.sh "<comment heading>" <report.md>
-#
-# Optional: REPORT_NOTE — Markdown inserted under the summary table.
-#
-# Exit status: 0 when the plan and the guard succeed, 1 otherwise. Failed
-# governance checks are warnings: they appear in the report but never fail
-# the job, so an orphan elsewhere in the org cannot block an unrelated change.
-#
-# Shared by terraform-plan.yml and terraform-plan-code.yml so the two comments
-# can never drift apart in what they check or how they say it.
 
 set -uo pipefail
 

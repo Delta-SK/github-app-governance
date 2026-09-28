@@ -5,8 +5,8 @@
 locals {
   github_org = "Delta-SK"
 
-  # Longest allowed time between reviews, by the riskiest permission an app
-  # holds (docs/GOVERNANCE.md §3).
+  # Longest time between reviews, by the riskiest permission an app holds
+  # (docs/decisions/0004).
   review_max_days = {
     high   = 90  # write/admin on a permission in high_risk_permissions
     medium = 180 # any other write/admin

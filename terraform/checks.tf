@@ -1,15 +1,9 @@
-// Governance findings. check blocks warn and never block: each describes
-// something that happened outside the pull request, so it must not stop an
-// unrelated change. Warnings leave terraform's exit code at 0, so the
-// reconciler reads them from the plan JSON (reconcile.yml).
-//
-// Blocking controls are elsewhere: validations (variables.tf), preconditions
-// (app_access.tf, data.tf) and the destroy guard (scripts/plan-guard.sh).
+// Governance findings: warnings, because each describes something outside the
+// pull request. They leave the exit code at 0, so the reconciler reads them
+// from the plan JSON.
 
 locals {
-  // Apps outside the review cycle: being decommissioned, or already moved to
-  // quarantine by a lapsed review. Their permissions and suspension no longer
-  // matter.
+  // Decommissioning or lapsed apps: their permissions no longer matter.
   in_review_cycle = {
     for slug in local.catalogued : slug => !contains(["decommissioning", "lapsed"], local.review_status[slug])
   }

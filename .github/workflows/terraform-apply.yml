@@ -31,9 +31,7 @@ jobs:
       contents: read
       id-token: write
 
-    # Runs code already merged to main, so it is trusted. The environment
-    # admits main only rather than gating on a reviewer — the pull request
-    # that merged the change was the gate.
+    # Main only; the pull request review was the gate.
     environment: production
 
     defaults:
@@ -63,21 +61,14 @@ jobs:
       - name: terraform init
         run: terraform init -input=false -no-color
 
-      # The plan is recomputed here rather than reusing one from the pull
-      # request. Both pull request plans are previews: the automatic one ran
-      # against main as it was when the PR was last pushed, and the code plan
-      # ran the pull request's own code — an artifact from that job must
-      # never reach the apply credential. This is the plan of record.
-      #
-      # Saving it and applying the saved file means the log below shows
-      # exactly what was applied — nothing is re-planned between the two.
+      # The plan of record: computed here, never reused from a pull request,
+      # and applied exactly as saved (docs/decisions/0002).
       - name: terraform plan (plan of record)
         env:
           GITHUB_TOKEN: ${{ secrets.TF_GITHUB_TOKEN }}
         run: terraform plan -no-color -input=false -out=tfplan
 
-      # The enforcing copy of the guard. Runs from main, so a pull request
-      # cannot have edited it.
+      # The enforcing copy of the guard, from main.
       - name: plan guard
         run: bash ../scripts/plan-guard.sh tfplan
 

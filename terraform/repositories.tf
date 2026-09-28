@@ -13,11 +13,7 @@ resource "github_repository" "this" {
   allow_squash_merge     = true
   allow_rebase_merge     = false
 
-  // A leaked credential in any repository an app can reach is a credential
-  // that app's vendor can read. Push protection stops the commit; scanning
-  // catches what predates it. Free on public repositories. advanced_security
-  // is deliberately absent: GitHub rejects setting it on public repositories,
-  // where it is always on.
+  // No advanced_security block: GitHub rejects it on public repositories.
   security_and_analysis {
     secret_scanning {
       status = "enabled"
@@ -35,10 +31,7 @@ resource "github_repository_vulnerability_alerts" "this" {
   enabled    = true
 }
 
-// Repository rulesets rather than classic branch protection: rulesets are
-// GitHub's successor, apply to administrators unless they are explicitly
-// listed as bypass actors (none here), and are readable without an admin
-// token — so tools such as OpenSSF Scorecard can verify them.
+// Rulesets with no bypass actors (docs/decisions/0005).
 resource "github_repository_ruleset" "main" {
   for_each = github_repository.this
 

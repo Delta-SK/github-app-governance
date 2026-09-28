@@ -37,9 +37,7 @@ output "decommissioned_apps" {
   value       = var.decommissioned_apps
 }
 
-// Read by scripts/plan-guard.sh from the saved plan. Exposed as an output
-// because it is a local (settings.tf), and plan JSON records output values
-// but not locals.
+// For scripts/plan-guard.sh: plan JSON records outputs, not locals.
 output "quarantine_repository" {
   description = "Repository that apps being decommissioned are narrowed to."
   value       = local.quarantine_repository

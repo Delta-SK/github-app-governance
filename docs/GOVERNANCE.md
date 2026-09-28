@@ -81,54 +81,50 @@ the entries federate.
 
 ## 3. Review and expiry
 
-Every entry carries `review_by`. The precondition in `app_access.tf` fails on
-every plan once that date passes, naming the app and its owning team.
+Every entry carries `review_by`. How far away it may be depends on what the
+app can do, and what happens when it passes is decided in advance: access is
+removed unless someone renews it.
 
-The escalation ladder — increasing pressure, never a surprise:
+**Cadence follows risk.** An app's tier comes from its approved
+`permissions` (`terraform/review.tf`, limits in `terraform/settings.tf`):
 
-| When | What happens | Status |
+| Tier | Rule | Longest review interval |
 | --- | --- | --- |
-| `review_by` − 30 days | Warning surfaces on every plan | **Implemented** — `reviews_are_due_soon` in `checks.tf` |
-| `review_by` | Plan **fails**; no change to any app can be applied until the entry is reconciled | **Implemented** — resource precondition in `app_access.tf` |
-| weekly, regardless | Reconciler raises an issue naming the app and owner | **Implemented** — `reconcile.yml` |
-| `review_by` + 30 days | Automated PR narrowing the app to the quarantine repository | Designed, not implemented |
-| PR merged or overridden | Owner either defends the access or it lapses | Follows from the above |
+| High | write or admin on anything that controls what code runs or who has access: workflows, actions, administration, repository or organisation hooks, environments, secrets, members | 90 days |
+| Medium | any other write | 180 days |
+| Low | read-only | 366 days |
 
-A `review_by` date can be at most `max_review_days` (366) away — enforced by a
-precondition — so "renew once for ten years" is not available as a way out of
-review.
+A `review_by` beyond the tier's limit fails the plan of the pull request that
+sets it — and only that one, since the limit moves further out with time,
+never closer.
 
-Expiry is a **blocking** condition rather than a warning, and that choice is
-deliberate. A `check` block would let an expired app keep being applied
-indefinitely, which makes the review date decorative — the failure mode it is
-supposed to prevent. A resource precondition stops the plan.
+**The escalation ladder** — increasing pressure, never a surprise, and never a
+blocked pipeline:
 
-Note the asymmetry with orphan detection, which only warns. Stale data you own
-should block your own apply. An installation somebody else added should not
-block your unrelated change — that would teach people to route around the
-pipeline, which is worse than the orphan.
+| When | What happens | Where |
+| --- | --- | --- |
+| `review_by` − 30 days | "Review due" warning on every plan and in the weekly issue | `reviews_are_due_soon` |
+| `review_by` | "Review overdue" warning, naming the date access will be removed | `reviews_are_overdue` |
+| `review_by` + 30 days | **Access moves to the quarantine repository** in every plan; the next apply enforces it | `review.tf`, `reviews_have_lapsed` |
+| Any time | A pull request with a new `review_by` restores access at the next apply; decommissioning takes the app out of the cycle | §5 |
 
-The important inversion is at the bottom of the ladder: **the default outcome
-should be removal.** An owner who wants to keep access must act; in the common
-failure mode — the owning team no longer exists, or no longer cares — nobody
-acts, and the access disappears.
+**The default outcome is removal.** An owner who wants to keep access must act;
+in the common failure mode — the owning team no longer exists, or no longer
+cares — nobody acts, and the access disappears. Without that inversion
+expiry dates are decoration.
 
-Be precise about how much of that is built. Today the default outcome of
-inaction is a **blocked pipeline and an open issue naming the owner** — the
-access itself stays until somebody opens the quarantine pull request. That is
-already far better than silence: nobody can change *any* app until the lapsed
-one is dealt with, so it cannot be ignored for long. Closing the gap — the
-reconciler opening the quarantine PR itself — is the next thing to build.
+Why expiry revokes instead of blocking: an earlier version failed every plan
+once any app's date passed. At 500 apps on annual review that is about ten
+expiries a week — the pipeline would be blocked most of the time, and the
+predictable response is to rubber-stamp renewals just to unblock it. Revoking
+the lapsed app's access keeps the pressure on its owner, where it belongs,
+and leaves everyone else's work alone. It is the same model as access-review
+tooling that removes unreviewed access automatically.
 
-Without the inversion, expiry dates are decoration. With it, the org's attack
-surface shrinks by default and grows only deliberately.
-
-Review cadence should follow risk, not a uniform calendar: an app with `write`
-on the payments repository deserves quarterly review; an app with `read` on a
-docs repo deserves annual. Cadence derives from the permissions the app holds
-and the sensitivity of the repositories it reaches.
-
----
+Renewal is a pull request like any other: it shows the app's current
+permissions and repositories next to the new date, and needs a code owner's
+approval. Rubber-stamping is harder when the reviewer sees exactly what is
+being re-approved — and high-risk apps come back every quarter.
 
 ## 4. Detecting the app nobody remembers installing
 
@@ -149,10 +145,10 @@ orphans = setsubtract(local.installed_slugs, setunion(local.catalogued, local.to
 
 Non-empty means somebody installed something outside the process. Tombstoned
 apps are excluded because they get a more specific message of their own
-(§5). The reverse comparison matters too: a catalogued app that is no longer
-installed, or whose `installation_id` belongs to a different app, is flagged
-— the second one blocks, since Terraform would otherwise act on the wrong
-installation.
+(§5). The reverse comparison needs no check of its own: installation IDs are
+looked up by slug, so a catalogue entry cannot point at the wrong
+installation, and an entry for an app that is not installed fails its own
+plan.
 
 It runs in two places, and it needs both:
 
@@ -326,13 +322,15 @@ The recurrence is prevented at the org settings level:
    can install apps on an organisation; everyone else can only *request*.
    Since January 2026, **Member privileges → App access requests** also
    controls who may request — members and outside collaborators, members
-   only, or nobody. Set it to *members only*, so outside collaborators cannot
-   generate requests, or to *disabled* once the request form in this
-   repository (`.github/ISSUE_TEMPLATE/app-request.yml`) is the one channel.
-   This converts the problem from *unbounded* to *reviewed*.
-2. **Make the catalogue PR the request channel.** An engineer who wants an app
-   opens a PR adding a catalogue entry. Review is the approval. Merge is the
-   installation authorisation. There is no other path.
+   only, or nobody. Set it to *disabled*: the catalogue pull request is the
+   one channel. This converts the problem from *unbounded* to *reviewed*.
+2. **The catalogue pull request is the request.** An engineer who wants an
+   app opens a pull request adding its entry — owner, purpose,
+   justification, repositories, permissions, review date. Nothing needs to be
+   typed twice, and nothing needs to be known that the app's public page
+   does not show. Review is the approval; the plan stays red ("not
+   installed") until an owner installs the app, so the entry cannot merge
+   before the installation it authorises exists. Merge is the enforcement.
 3. **Default to narrow scope.** New entries name specific repositories. Org-wide
    access is available, but as a deliberate, justified, reviewed exception.
 4. **Review permissions, not just repositories.** Every catalogue entry

@@ -30,14 +30,13 @@ variable "app_catalogue" {
     is not listed here is unauthorised by definition, and the orphan check in
     checks.tf flags it on every plan and in the weekly reconciliation issue.
 
-    installation_id is discovered out-of-band (Settings > GitHub Apps, or the
-    org_installations output) because an app must already be installed before
-    its repository access can be managed. Terraform cannot install or uninstall
-    an app — see README "Limitations".
+    The installation ID is not recorded: it is looked up from the live
+    installation by slug. The app must be installed before its entry can be
+    applied; Terraform cannot install or uninstall an app (README,
+    "Limitations").
   EOT
 
   type = map(object({
-    installation_id = string
     owner           = string
     purpose         = string
     justification   = string
@@ -58,11 +57,9 @@ variable "app_catalogue" {
     error_message = "An installation must retain at least one repository — GitHub rejects removing the last one. To revoke access, set decommissioning = true and point the app at the quarantine repository. See docs/GOVERNANCE.md §5."
   }
 
-  # `decommissioning = true` exempts an app from the expiry precondition. That
-  # exemption must not be usable to keep real access: a decommissioning app
-  # reaches the quarantine repository and nothing else. Conversely the
-  # quarantine repository is for decommissioning only, so its presence in a
-  # diff always means the same thing.
+  # A decommissioning app is outside the review cycle, so the flag must not be
+  # usable to keep real access: it goes with the quarantine repository alone,
+  # and the quarantine repository with nothing else.
   validation {
     condition = alltrue([
       for a in var.app_catalogue :
@@ -71,13 +68,6 @@ variable "app_catalogue" {
       : !contains(a.repositories, local.quarantine_repository)
     ])
     error_message = "An app with decommissioning = true must list exactly the quarantine repository (${local.quarantine_repository}), and no other app may list it."
-  }
-
-  # A placeholder such as "TBD" would plan cleanly (nothing calls the API for a
-  # create at plan time) and only fail during apply, after merge.
-  validation {
-    condition     = alltrue([for a in var.app_catalogue : can(regex("^[0-9]+$", a.installation_id))])
-    error_message = "installation_id must be the numeric ID of an existing installation. Install the app first, then copy the ID from its Configure page URL or `gh api orgs/<org>/installations`."
   }
 
   validation {

@@ -1,28 +1,29 @@
-// Policy settings: the rules that judge the catalogue, and where it applies.
-//
-// Deliberately locals, not variables. Every *.tfvars file is data that pull
-// requests change and that terraform-plan.yml plans automatically with the
-// organisation-admin credential. If these were variables, a catalogue pull
-// request could quietly add `max_review_days = 99999` or point the whole plan
-// at another organisation. As locals they can only change through a code
-// change, which CODEOWNERS routes to the platform team and which is planned by
-// the approval-gated terraform-plan-code.yml.
+// Policy settings: the rules that judge the catalogue. Locals, not variables,
+// so a catalogue (*.tfvars) pull request cannot change them — only a reviewed
+// code change can.
 
 locals {
-  # GitHub organisation being governed. The only org-specific value in this
-  # directory apart from the backend block and the catalogue itself.
   github_org = "Delta-SK"
 
-  # How long before review_by to start warning on every plan. Expiry itself
-  # blocks (app_access.tf); this is the advance notice.
-  review_warning_days = 30
+  # Longest allowed time between reviews, by the riskiest permission an app
+  # holds (docs/GOVERNANCE.md §3).
+  review_max_days = {
+    high   = 90  # write/admin on a permission in high_risk_permissions
+    medium = 180 # any other write/admin
+    low    = 366 # read-only
+  }
 
-  # Furthest a review_by date may be set in the future. Without a ceiling,
-  # `review_by = "2099-12-31"` quietly opts an app out of review.
-  max_review_days = 366
+  # Permissions that control what code runs, or who has access.
+  high_risk_permissions = [
+    "actions", "administration", "environments", "members",
+    "organization_administration", "organization_hooks",
+    "organization_secrets", "repository_hooks", "secrets", "workflows",
+  ]
 
-  # Repository that apps being decommissioned are narrowed to. GitHub will not
-  # let an installation drop its last repository, so "revoke all access" has
-  # to be expressed as "point it at a repository containing nothing".
+  review_warning_days = 30 # warn this long before review_by
+  review_grace_days   = 30 # after review_by, access moves to quarantine
+
+  # GitHub will not let an installation drop its last repository, so revoked
+  # access is expressed as "reaches only this empty repository".
   quarantine_repository = "app-quarantine"
 }

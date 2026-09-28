@@ -1,18 +1,19 @@
-// Governance controls that run on every plan. These surface problems the
-// core resources cannot: an app installed by hand that nobody declared, an
-// installation scoped so broadly it cannot be governed, a catalogue entry
-// that has drifted from reality, or a review date approaching.
+// Governance findings. check blocks warn and never block: each describes
+// something that happened outside the pull request, so it must not stop an
+// unrelated change. Warnings leave terraform's exit code at 0, so the
+// reconciler reads them from the plan JSON (reconcile.yml).
 //
-// check blocks warn rather than block. That is deliberate — an orphan app is
-// a signal to investigate, not a reason to stop an unrelated apply. Warnings
-// do NOT change terraform's exit code, so the scheduled reconciler reads
-// check results out of the plan JSON instead (reconcile.yml).
-//
-// The blocking controls live elsewhere: variable validations in variables.tf,
-// resource preconditions (expiry, review horizon, installation ID) in
-// app_access.tf, and the destroy guard in scripts/plan-guard.sh.
+// Blocking controls are elsewhere: validations (variables.tf), preconditions
+// (app_access.tf, data.tf) and the destroy guard (scripts/plan-guard.sh).
 
 locals {
+  // Apps outside the review cycle: being decommissioned, or already moved to
+  // quarantine by a lapsed review. Their permissions and suspension no longer
+  // matter.
+  in_review_cycle = {
+    for slug in local.catalogued : slug => !contains(["decommissioning", "lapsed"], local.review_status[slug])
+  }
+
   orphans = setsubtract(local.installed_slugs, setunion(local.catalogued, local.tombstoned))
 
   unselectable = sort([
@@ -20,35 +21,32 @@ locals {
     slug if local.installations[slug].repository_selection != "selected"
   ])
 
-  not_installed = setsubtract(local.catalogued, local.installed_slugs)
-
   reinstalled_tombstones = sort([
     for slug in setintersection(local.tombstoned, local.installed_slugs) :
     "${slug} (removed ${var.decommissioned_apps[slug].removed_on}: ${var.decommissioned_apps[slug].reason})"
   ])
 
-  // Decommissioning apps are past their review date by design and may be
-  // suspended as part of the runbook, so they are exempt from the review and
-  // suspension checks — otherwise following the runbook would raise alerts.
-  due_soon = sort([
-    for slug, app in var.app_catalogue :
-    "${slug} (owner: ${app.owner}, due ${app.review_by})"
-    if !app.decommissioning && timecmp(timeadd(plantimestamp(), "${local.review_warning_days * 24}h"), "${app.review_by}T00:00:00Z") >= 0
-  ])
+  reviews = {
+    for status in ["due_soon", "overdue", "lapsed"] : status => sort([
+      for slug, app in var.app_catalogue :
+      "${slug} (owner ${app.owner}, review_by ${app.review_by}, quarantine from ${formatdate("YYYY-MM-DD", local.review[slug].lapses_on)})"
+      if local.review_status[slug] == status
+    ])
+  }
 
   suspended = sort([
     for slug in setintersection(local.catalogued, local.installed_slugs) :
-    slug if local.installations[slug].suspended && !var.app_catalogue[slug].decommissioning
+    slug if local.installations[slug].suspended && local.in_review_cycle[slug]
   ])
 
-  // Every difference between approved and live permissions, both ways: a
-  // widening is a security finding, a narrowing means the catalogue is stale.
+  // Both directions: a widening is a security finding, a narrowing means the
+  // catalogue is stale.
   permission_drift = sort(flatten([
     for slug in setintersection(local.catalogued, local.installed_slugs) : [
       for key in setunion(keys(var.app_catalogue[slug].permissions), keys(local.installations[slug].permissions)) :
       "${slug}.${key}: approved ${lookup(var.app_catalogue[slug].permissions, key, "none")}, live ${lookup(local.installations[slug].permissions, key, "none")}"
       if lookup(var.app_catalogue[slug].permissions, key, "none") != lookup(local.installations[slug].permissions, key, "none")
-    ] if !var.app_catalogue[slug].decommissioning
+    ] if local.in_review_cycle[slug]
   ]))
 
   ghost_owners = setsubtract(
@@ -58,84 +56,69 @@ locals {
 }
 
 check "installations_are_declared" {
-  // The orphan detector. Anything installed in the org but absent from both
-  // the catalogue and the tombstones is, by definition, an app nobody signed
-  // up for.
   assert {
     condition     = length(local.orphans) == 0
-    error_message = "Undeclared GitHub App installation(s): ${join(", ", local.orphans)}. Either add an entry to catalogue.auto.tfvars with an owner and review date, or decommission per docs/OPERATIONS.md."
+    error_message = "Undeclared GitHub App installation(s): ${join(", ", local.orphans)}. Either catalogue each one with an owner, purpose and review date, or decommission it (docs/OPERATIONS.md)."
   }
 
-  // An installation set to "all repositories" exposes no per-repo scope, so
-  // selected_repositories silently governs nothing. Catch that rather than
-  // reporting a false clean plan.
+  // "All repositories" leaves nothing per-repository for Terraform to govern.
   assert {
     condition     = length(local.unselectable) == 0
-    error_message = "Catalogued app(s) installed with repository_selection=all: ${join(", ", local.unselectable)}. Repository access cannot be governed until these are switched to 'Only select repositories'."
-  }
-}
-
-check "catalogue_matches_installations" {
-  // An app uninstalled by hand while still catalogued. Once state exists the
-  // access resource fails to refresh first (the provider errors on a missing
-  // installation); this names the cause. A mismatched installation_id is
-  // the other half of this comparison, and blocks — see app_access.tf.
-  assert {
-    condition     = length(local.not_installed) == 0
-    error_message = "Catalogued app(s) not installed in the org: ${join(", ", local.not_installed)}. If the app was removed on purpose, move its entry to decommissioned_apps; otherwise reinstall it."
+    error_message = "Catalogued app(s) installed with repository_selection=all: ${join(", ", local.unselectable)}. Switch them to 'Only select repositories' before their access can be governed."
   }
 }
 
 check "tombstones_are_uninstalled" {
-  // Expected briefly between releasing an app (stage 3) and uninstalling it
-  // (stage 4). After that, it means somebody reinstalled an app the org
-  // already decided to remove — and this says why it was removed.
+  // Expected between releasing an app and uninstalling it; after that it
+  // means a removed app was reinstalled.
   assert {
     condition     = length(local.reinstalled_tombstones) == 0
-    error_message = "Decommissioned app(s) still installed: ${join("; ", local.reinstalled_tombstones)}. Finish stage 4 (uninstall in the org settings), or, if it is genuinely needed again, re-add it to the catalogue through a pull request."
+    error_message = "Decommissioned app(s) still installed: ${join("; ", local.reinstalled_tombstones)}. Finish the uninstall, or re-add the app to the catalogue through a pull request if it is needed again."
   }
 }
 
 check "reviews_are_due_soon" {
-  // Expiry itself blocks, via the precondition in app_access.tf. This only
-  // gives owners advance warning so the deadline is not a surprise.
   assert {
-    condition     = length(local.due_soon) == 0
-    error_message = "App(s) due for review within ${local.review_warning_days} days: ${join(", ", local.due_soon)}. Re-confirm the access is still needed before the date passes — after it, plans fail."
+    condition     = length(local.reviews.due_soon) == 0
+    error_message = "Review due within ${local.review_warning_days} days: ${join("; ", local.reviews.due_soon)}. The owner renews it with a pull request that sets a new review_by."
+  }
+}
+
+check "reviews_are_overdue" {
+  assert {
+    condition     = length(local.reviews.overdue) == 0
+    error_message = "Review overdue: ${join("; ", local.reviews.overdue)}. Unless renewed, access moves to the quarantine repository on the date shown."
+  }
+}
+
+check "reviews_have_lapsed" {
+  assert {
+    condition     = length(local.reviews.lapsed) == 0
+    error_message = "Review lapsed, access narrowed to the quarantine repository: ${join("; ", local.reviews.lapsed)}. Renew with a new review_by to restore it, or decommission the app."
   }
 }
 
 check "owners_are_real_teams" {
-  // `owner` being free text is how ownership rots: a team is renamed or
-  // deleted during a reorg and the catalogue keeps naming a team that no
-  // longer exists. Nobody notices, because nothing was ever checking.
-  //
-  // A warning rather than a blocker: a deleted team is a reason to find a new
-  // owner, not a reason to freeze every app in the org.
+  // A team renamed or deleted in a reorg leaves its apps unowned.
   assert {
     condition     = length(local.ghost_owners) == 0
-    error_message = "Catalogue names owner team(s) that do not exist in the organisation: ${join(", ", local.ghost_owners)}. Existing teams: ${join(", ", data.github_organization_teams.all.teams[*].slug)}. Either create the team, correct the entry, or reassign the app to a team that will actually answer for it."
+    error_message = "Owner team(s) that do not exist in the organisation: ${join(", ", local.ghost_owners)}. Existing teams: ${join(", ", data.github_organization_teams.all.teams[*].slug)}. Reassign the app to a team that will answer for it."
   }
 }
 
 check "no_suspended_installations" {
-  // A suspended installation still holds its grants and reappears intact when
-  // unsuspended. Terraform reports no drift, so without this it is invisible.
+  // Suspension keeps every grant, and Terraform sees no drift.
   assert {
     condition     = length(local.suspended) == 0
-    error_message = "Catalogued app(s) currently suspended: ${join(", ", local.suspended)}. Suspension retains every grant — either decommission it properly (docs/OPERATIONS.md) or unsuspend and confirm the access is still wanted."
+    error_message = "Catalogued app(s) suspended: ${join(", ", local.suspended)}. Either decommission it or unsuspend it and confirm the access is still wanted."
   }
 }
 
 check "permissions_match_catalogue" {
-  // Repository scope is enforced by Terraform; permissions cannot be — they
-  // are part of the app, and GitHub changes them when an owner accepts an
-  // app update's request for more. This makes that acceptance visible.
-  // A warning, because the change already happened outside the pull request:
-  // the response is a pull request that either records the new permissions
-  // (approving them) or starts decommissioning the app.
+  // Permissions change outside pull requests: an owner accepts an app
+  // update's request for more.
   assert {
     condition     = length(local.permission_drift) == 0
-    error_message = "Installed permissions differ from the catalogue: ${join("; ", local.permission_drift)}. If the change was accepted deliberately, record it in the app's `permissions` through a pull request; otherwise investigate who accepted it. See docs/OPERATIONS.md."
+    error_message = "Installed permissions differ from the catalogue: ${join("; ", local.permission_drift)}. Record an accepted change in the app's permissions through a pull request, or find out who accepted it."
   }
 }

@@ -1,12 +1,13 @@
 output "app_access_matrix" {
-  description = "Which app can reach which repositories, as Terraform intends it. Compare against the GitHub UI to spot drift."
+  description = "What each app may reach, as Terraform enforces it, with its review status."
   value = {
     for slug, app in var.app_catalogue : slug => {
-      owner           = app.owner
-      review_by       = app.review_by
-      decommissioning = app.decommissioning
-      repositories    = sort(app.repositories)
-      permissions     = app.permissions
+      owner         = app.owner
+      review_by     = app.review_by
+      review_tier   = local.review[slug].tier
+      review_status = local.review_status[slug]
+      repositories  = sort(local.effective_repositories[slug])
+      permissions   = app.permissions
     }
   }
 }
@@ -17,7 +18,7 @@ output "managed_repositories" {
 }
 
 output "org_installations" {
-  description = "Every app installation live in the org, declared or not. Source for installation_id values and for spotting orphans."
+  description = "Every app installation live in the org, declared or not."
   value = {
     for slug, i in local.installations : slug => {
       installation_id      = tostring(i.id)

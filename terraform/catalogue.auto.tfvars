@@ -37,7 +37,7 @@ app_catalogue = {
     owner           = "platform-engineering"
     purpose         = "Automated dependency update pull requests"
     justification   = "Keeps transitive dependencies patched without manual tracking; required by the supply-chain policy."
-    review_by       = "2027-03-31"
+    review_by       = "2026-12-15"
     # Narrowed 2026-09-25: web-frontend pins dependencies via its own
     # lockfile workflow, so Renovate's access there was redundant.
     # Ticket: PLAT-1184
@@ -82,7 +82,7 @@ app_catalogue = {
     owner           = "web-team"
     purpose         = "Temporary governance demonstration"
     justification   = "Test installation used to demonstrate controlled GitHub App onboarding."
-    review_by       = "2027-03-31"
+    review_by       = "2026-12-15"
 
     repositories = [
       "web-frontend",

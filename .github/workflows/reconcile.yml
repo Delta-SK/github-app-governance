@@ -124,8 +124,8 @@ jobs:
             // Governance checks are warnings, so they do NOT move the exit
             // code — they are the only way an orphaned installation surfaces.
             const findings = [];
-            if (code === '1') findings.push('**The plan failed.** Most often an app past its `review_by` date (a blocking condition) — the error names the app and its owner.');
-            if (code === '2') findings.push('**Drift:** GitHub no longer matches the catalogue — access was changed outside a pull request. Either codify the change in a pull request, or run `terraform-apply` manually to restore the catalogue\'s access.');
+            if (code === '1') findings.push('**The plan failed.** Most often a catalogued app that is not installed — the error names it.');
+            if (code === '2') findings.push('**Changes pending:** GitHub differs from what the catalogue requires — access changed outside a pull request, or a lapsed review moving an app to quarantine (see the governance checks). Run `terraform-apply` to enforce it, or codify a deliberate manual change in a pull request.');
             if (failedChecks.length) findings.push(`**Governance checks failed:** ${failedChecks.map(c => '`' + c + '`').join(', ')}. The messages in the plan output say what to do.`);
             if (process.env.CONTROLS_FAILED !== '0') findings.push('**This repository\'s own controls were weakened:**\n\n' + controls + '\n\nRestore them by re-applying `bootstrap/`.');
 

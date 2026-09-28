@@ -8,7 +8,7 @@
 
 <!-- One line, e.g. "Grant Renovate access to web-frontend" -->
 
-**Type:** new app / add access / narrow access / review renewal / decommission (quarantine) / decommission (release) / other
+**Type:** new app request / add access / narrow access / review renewal / decommission (quarantine) / decommission (release) / other
 
 **App(s):**
 **Owning team:**
@@ -16,14 +16,15 @@
 
 ## Why
 
-<!-- New app or wider access: what problem it solves, and why these repositories and no others. -->
+<!-- New app request: what problem it solves, why these repositories and no others, and a link to the app's page. The plan stays red ("not installed") until an organisation owner installs it after review. -->
+<!-- Wider access: why these repositories are needed. -->
 <!-- Review renewal: who confirmed the access is still needed, and how. -->
 <!-- Decommission: why it is being removed; what replaces it, if anything. -->
 
 ## Author checklist
 
 - [ ] The owning team is a real GitHub team and has agreed to own this app
-- [ ] `review_by` is no more than 12 months out
+- [ ] `review_by` is within the app's tier limit (90 days high risk, 180 medium, 366 read-only)
 - [ ] Every listed repository is actually needed — not "might be useful"
 - [ ] `permissions` match the app's Configure page exactly; any widening is explained under *Why*
 - [ ] For a release: the app has been in quarantine for the whole soak period (7–14 days) with nothing breaking

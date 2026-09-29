@@ -170,7 +170,7 @@ terraform init
 terraform apply
 ```
 
-Creates the S3 state bucket (versioned, encrypted, TLS-only, locking
+Creates the S3 state bucket, need to use unic name in AWS ./bootstrap/main.tf (versioned, encrypted, TLS-only, locking
 S3-native), the GitHub OIDC provider, the three CI roles (plan, apply,
 audit), the `platform-engineering` team, the app-owning teams listed in
 `app_owner_teams`, this repository's settings and its ruleset on `main`, and

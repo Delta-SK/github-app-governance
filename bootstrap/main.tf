@@ -15,6 +15,7 @@ terraform {
 
   # On a fresh account: comment out for the first apply, then restore and
   # `terraform init -migrate-state` (README, Setup step 1).
+  # change the bucket name to a unique one!
   backend "s3" {
     bucket       = "delta-sk-tfstate-751569314116"
     key          = "github-app-governance/bootstrap.tfstate"

@@ -91,10 +91,10 @@ app_catalogue = {
   }
 
   codefactor-io = {
-    owner         = "payments-team"
+    owner         = "web-team"
     purpose       = "Temporary governance demonstration"
     justification = "Test installation used to demonstrate controlled GitHub App onboarding."
-    review_by     = "2026-12-15"
+    review_by     = "2026-09-28"
 
     repositories = [
       "payments-api",

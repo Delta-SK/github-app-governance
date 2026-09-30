@@ -114,4 +114,28 @@ app_catalogue = {
     }
 
   }
+  codefactor-io = {
+    owner         = "web-team"
+    purpose       = "Temporary governance demonstration"
+    justification = "Test installation used to demonstrate controlled GitHub App onboarding."
+    review_by     = "2026-10-30"
+
+    repositories = [
+      "payments-api",
+    ]
+
+    permissions = {
+      administration              = "read"
+      checks                      = "write"
+      contents                    = "write"
+      issues                      = "write"
+      members                     = "read"
+      metadata                    = "read"
+      organization_administration = "read"
+      pull_requests               = "write"
+      repository_hooks            = "write"
+      statuses                    = "write"
+    }
+
+  }
 }

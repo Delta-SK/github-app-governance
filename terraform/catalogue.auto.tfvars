@@ -90,5 +90,4 @@ app_catalogue = {
     }
   }
 
-  
 }
